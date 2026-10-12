@@ -1,0 +1,16 @@
+﻿[workspace]
+resolver = "2"
+members = ["crates/evolve_engine", "crates/evolve_editor", "crates/evolve_player"]
+
+# Used only for the browser player (tools/build-web-player.ps1): smaller download, same code.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 2   # software rasterization is unusably slow at opt-level 0
+
