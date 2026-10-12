@@ -24,14 +24,14 @@ Everything the roadmap asked for is implemented (see [README.md](README.md)). Th
 
 ### Limits of this work
 
-- [ ] *Not hand-tested:* the Game view while the Scene tab is closed, Duplicate and *Set as start scene* in the
-      Scenes panel, deleting a scene that is not open, Play (`F5`) from a scene other than the start scene, the
-      unsaved-changes prompt after scene-list changes, and saving / reopening a multi-scene file through the dialogs.
-      (Verified by hand: the default layout, dragging a panel to split, layout restored after a restart, creating
-      objects from the "+ Add" menu, selecting the camera, Play from start including a click on the title button,
-      moving, deleting and renaming scenes. The file format and scene switching have unit tests.)
+- [x] Hand-tested with [MANUAL_TESTS.md](MANUAL_TESTS.md) (section "Scenes and cameras"): the Game view while the
+      Scene tab is closed, Duplicate and *Set as start scene*, deleting open and closed scenes, Play (`F5`) from a
+      scene other than the start scene, the unsaved-changes prompt after scene-list changes, and saving / reopening a
+      multi-scene file through the dialogs. The test found and fixed: renaming (Enter did not close the box),
+      object duplicates not named "... copy", Esc not closing the delete box, and the camera-protection message
+      being easy to miss. Re-run the checklist after larger changes to scenes or the file format.
 - [ ] Undo history is per open scene and starts over when you switch scenes; scene-list changes (add, rename,
-      reorder, delete) are not undoable.
+      reorder, delete) are not undoable. (Deleting a scene now asks for confirmation first.)
 - [ ] Symbols (the Assets panel), animation clips and IK constraints belong to one scene; there is no project-wide
       asset library. Pasting between scenes copies the symbols it needs.
 - [ ] Only the first camera of a scene is used; no switching between several cameras from scripts, no camera
@@ -46,7 +46,9 @@ Everything the roadmap asked for is implemented (see [README.md](README.md)). Th
 - [ ] The Game view has no resolution or aspect-ratio presets, no "maximize on play", and no stats overlay in the
       Scene view while playing.
 - [ ] Panels cannot be torn out into separate OS windows.
-- [ ] A default frame of 1280 x 720 is used when a scene has no camera; deleting the camera is allowed.
+- [x] The scene's only camera can no longer be deleted or cut (alone or inside a group); a scene without a camera
+      (old projects) still falls back to a 1280 x 720 frame. A second camera, if one gets in through paste or
+      duplicate, can be deleted.
 
 ---
 
@@ -84,8 +86,8 @@ All six were completed in the second round of work:
 - [ ] Paste does not carry skins or IK constraints (they refer to bones of the original); the status line says so.
 - [ ] Pasting into a different document duplicates a symbol whose contents differ from an existing one of the same id.
 - [ ] Only one recovery slot exists (the most recent unsaved document); the interval (30 s) is fixed.
-- [ ] PNG sequence export runs on the UI thread: the window is unresponsive while it renders, and there is no
-      progress bar or cancel.
+- [x] PNG sequence export now runs on a worker thread with a progress window and Cancel (frames already written
+      stay on disk). Only one sequence can run at a time; the single-PNG export is still synchronous.
 - [ ] SVG export leaves out bones, uses the current pose, and has no options (precision, embedded names, flattening
       of symbols).
 - [ ] `instantiate` copies into the template's parent and has no pooling or despawn timer; copies can only be

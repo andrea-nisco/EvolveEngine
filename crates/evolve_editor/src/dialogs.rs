@@ -32,7 +32,13 @@ pub struct Dialogs {
     pub pending: Option<Pending>,
     pub recovery: Option<Recovery>,
     pub image_export: Option<ImageExport>,
+    pub sequence_job: Option<crate::export_ui::SequenceJob>,
+    /// A short message shown over the workspace for a few seconds, and when it appeared.
+    pub notice: Option<(String, Instant)>,
 }
+
+/// How long a notice stays on screen.
+const NOTICE_SECONDS: f32 = 4.0;
 
 /// Timers and flags behind the dialogs.
 pub struct DialogState {
@@ -101,10 +107,35 @@ impl EditorApp {
         }
     }
 
+    /// Tells the user something that must not be missed: it goes to the status bar and also
+    /// appears as a notice over the workspace.
+    pub fn notify(&mut self, text: &str) {
+        self.status = text.into();
+        self.dialogs.notice = Some((text.into(), Instant::now()));
+    }
+
+    fn notice_toast(&mut self, ctx: &egui::Context) {
+        let Some((text, since)) = self.dialogs.notice.as_ref() else { return };
+        let left = NOTICE_SECONDS - since.elapsed().as_secs_f32();
+        if left <= 0.0 {
+            self.dialogs.notice = None;
+            return;
+        }
+        egui::Area::new(egui::Id::new("notice")).order(egui::Order::Tooltip).anchor(Align2::CENTER_BOTTOM, [0.0, -48.0]).interactable(false).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(egui::RichText::new(text).strong());
+            });
+        });
+        ctx.request_repaint_after(Duration::from_secs_f32(left));
+    }
+
     pub fn show_dialogs(&mut self, ctx: &egui::Context) {
+        self.notice_toast(ctx);
         self.unsaved_dialog(ctx);
+        self.delete_scene_dialog(ctx);
         self.recovery_dialog(ctx);
         self.image_export_dialog(ctx);
+        self.sequence_export_dialog(ctx);
     }
 
     fn unsaved_dialog(&mut self, ctx: &egui::Context) {

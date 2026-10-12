@@ -101,6 +101,21 @@ impl Scene {
         self.all_ids().into_iter().find(|&id| matches!(self.find(id).map(|n| &n.kind), Some(NodeKind::Camera(_))))
     }
 
+    /// The top-level objects of `ids` that can be deleted without leaving the scene without a camera.
+    /// If the deletion would remove every camera, the one holding the main camera (the camera itself,
+    /// or the group around it) is left out. Scenes that have no camera to begin with are not affected.
+    pub fn deletable(&self, ids: &[NodeId]) -> Vec<NodeId> {
+        let mut top = self.top_level_selection(ids);
+        let is_camera = |id: &NodeId| matches!(self.find(*id).map(|n| &n.kind), Some(NodeKind::Camera(_)));
+        let cameras: Vec<NodeId> = self.all_ids().into_iter().filter(is_camera).collect();
+        let doomed = |camera: &NodeId| top.iter().any(|&id| id == *camera || self.is_descendant(id, *camera));
+        if !cameras.is_empty() && cameras.iter().all(doomed) {
+            let main = cameras[0];
+            top.retain(|&id| id != main && !self.is_descendant(id, main));
+        }
+        top
+    }
+
     /// What the player sees: the main camera, or a default frame over `(0, 0)..(1280, 720)` without one.
     pub fn camera_view(&self) -> CameraView {
         self.main_camera()
@@ -178,6 +193,43 @@ mod tests {
         let group = scene.group(&[camera]).unwrap();
         scene.find_mut(group).unwrap().transform = Affine2::from_translation(Vec2::new(40.0, 0.0));
         assert!(scene.camera_view().center.distance(Vec2::new(140.0, 50.0)) < 1e-3);
+    }
+
+    #[test]
+    fn the_only_camera_cannot_be_deleted_but_other_objects_can() {
+        let mut scene = Scene::with_camera(Vec2::new(200.0, 100.0));
+        let camera = scene.main_camera().unwrap();
+        let other = scene.new_node("Other", NodeKind::Group(Vec::new()));
+        let other_id = other.id;
+        scene.add(other, None);
+        assert_eq!(scene.deletable(&[camera]), Vec::<NodeId>::new());
+        assert_eq!(scene.deletable(&[camera, other_id]), vec![other_id]);
+    }
+
+    #[test]
+    fn a_group_holding_the_only_camera_cannot_be_deleted() {
+        let mut scene = Scene::with_camera(Vec2::new(200.0, 100.0));
+        let camera = scene.main_camera().unwrap();
+        let group = scene.group(&[camera]).unwrap();
+        assert!(scene.deletable(&[group]).is_empty());
+    }
+
+    #[test]
+    fn a_second_camera_can_be_deleted_and_scenes_without_cameras_are_unaffected() {
+        let mut scene = Scene::with_camera(Vec2::new(200.0, 100.0));
+        let first = scene.main_camera().unwrap();
+        let extra = scene.new_camera(Vec2::new(10.0, 10.0), Vec2::ZERO);
+        let extra_id = extra.id;
+        scene.add(extra, None);
+        assert_eq!(scene.deletable(&[extra_id]), vec![extra_id]);
+        // Asking for both keeps the main (first) one.
+        assert_eq!(scene.deletable(&[first, extra_id]), vec![extra_id]);
+
+        let mut bare = Scene::default();
+        let node = bare.new_node("Solo", NodeKind::Group(Vec::new()));
+        let id = node.id;
+        bare.add(node, None);
+        assert_eq!(bare.deletable(&[id]), vec![id]);
     }
 
     #[test]

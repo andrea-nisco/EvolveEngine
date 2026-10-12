@@ -108,14 +108,17 @@ impl EditorApp {
                 if self.tree.renaming == Some(row.id) {
                     let mut name = row.name.clone();
                     let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(140.0));
-                    edit.request_focus();
                     if edit.changed() {
                         if let Some(node) = self.scene.find_mut(row.id) {
                             node.name = name;
                         }
                     }
+                    // Ask for focus only until the field has it: asking every frame would cancel
+                    // the focus loss that Enter (or a click elsewhere) causes, and it would never close.
                     if edit.lost_focus() {
                         self.tree.renaming = None;
+                    } else if !edit.has_focus() {
+                        edit.request_focus();
                     }
                 } else {
                     self.tree_label(ui, row, &mut actions);

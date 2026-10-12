@@ -23,11 +23,7 @@ impl EditorApp {
     }
 
     pub fn cut_selection(&mut self, ctx: &egui::Context) {
-        if self.copy_selection(ctx) {
-            for id in self.scene.top_level_selection(&self.selection) {
-                self.scene.remove(id);
-            }
-            self.selection.clear();
+        if self.copy_selection(ctx) && self.remove_selected() {
             self.status = "Cut".into();
         }
     }

@@ -6,13 +6,15 @@
 
 use crate::app::EditorApp;
 use crate::theme::ACCENT;
-use eframe::egui::{self, Sense};
+use eframe::egui::{self, Align2, Sense};
 use evolve_engine::project::Project;
 
 #[derive(Default)]
 pub struct ScenesState {
     /// The scene whose name is being typed, and the text so far.
     pub renaming: Option<(usize, String)>,
+    /// A scene waiting for the user to confirm its deletion (index and name at the time of asking).
+    pub confirm_delete: Option<(usize, String)>,
 }
 
 /// What the user asked for in the list; applied after the rows are drawn.
@@ -24,6 +26,7 @@ enum Action {
     Move(usize, isize),
     Delete(usize),
     CommitName(usize, String),
+    CancelRename,
 }
 
 impl EditorApp {
@@ -92,6 +95,34 @@ impl EditorApp {
         self.dirty = true;
     }
 
+    /// Asks before deleting a scene, since scene-list changes cannot be undone.
+    pub fn delete_scene_dialog(&mut self, ctx: &egui::Context) {
+        let Some((index, name)) = self.scenes_ui.confirm_delete.clone() else { return };
+        // The list may have changed while the question was open (or the game started).
+        if self.play.is_some() || index >= self.project.scenes.len() || self.scene_name_at(index) != name {
+            self.scenes_ui.confirm_delete = None;
+            return;
+        }
+        let mut confirmed = false;
+        let mut cancelled = false;
+        egui::Window::new("Delete scene").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.label(format!("Delete the scene \"{name}\" and everything in it?"));
+            ui.weak("This cannot be undone.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                confirmed = ui.button("Delete").clicked();
+                cancelled = ui.button("Cancel").clicked();
+            });
+        });
+        if confirmed || cancelled || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.scenes_ui.confirm_delete = None;
+        }
+        if confirmed {
+            self.delete_scene(index);
+            self.status = format!("Deleted scene \"{name}\"");
+        }
+    }
+
     fn move_scene(&mut self, index: usize, by: isize) {
         let to = index.saturating_add_signed(by).min(self.project.scenes.len() - 1);
         self.edit_scene_list(|project| project.move_scene(index, to));
@@ -135,7 +166,8 @@ impl EditorApp {
                     self.dirty = true;
                 }
                 Action::Move(i, by) => self.move_scene(i, by),
-                Action::Delete(i) => self.delete_scene(i),
+                Action::Delete(i) => self.scenes_ui.confirm_delete = Some((i, self.scene_name_at(i).to_string())),
+                Action::CancelRename => self.scenes_ui.renaming = None,
                 Action::CommitName(i, name) => {
                     self.rename_scene(i, &name);
                     self.scenes_ui.renaming = None;
@@ -150,9 +182,13 @@ impl EditorApp {
             ui.weak(format!("{}.", index + 1));
             if let Some((renaming, text)) = self.scenes_ui.renaming.as_mut().filter(|(i, _)| *i == index) {
                 let edit = ui.add(egui::TextEdit::singleline(text).desired_width(160.0));
-                edit.request_focus();
+                // Ask for focus only until the field has it: asking every frame would cancel the
+                // focus loss that Enter (or a click elsewhere) causes, and the box would never close.
                 if edit.lost_focus() {
-                    actions.push(Action::CommitName(*renaming, text.clone()));
+                    let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    actions.push(if cancelled { Action::CancelRename } else { Action::CommitName(*renaming, text.clone()) });
+                } else if !edit.has_focus() {
+                    edit.request_focus();
                 }
                 return;
             }

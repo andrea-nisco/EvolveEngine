@@ -344,10 +344,22 @@ impl EditorApp {
         if self.tool == Tool::Node && self.delete_selected_anchor() {
             return;
         }
-        for id in self.scene.top_level_selection(&self.selection) {
+        self.remove_selected();
+    }
+
+    /// Removes the selected objects, except the scene's only camera (which stays selected).
+    /// Returns false if something was kept for that reason.
+    pub fn remove_selected(&mut self) -> bool {
+        let removable = self.scene.deletable(&self.selection);
+        let kept_camera = removable.len() < self.scene.top_level_selection(&self.selection).len();
+        for &id in &removable {
             self.scene.remove(id);
         }
-        self.selection.clear();
+        self.selection.retain(|id| self.scene.find(*id).is_some());
+        if kept_camera {
+            self.notify("A scene needs a camera, so it was not deleted");
+        }
+        !kept_camera
     }
 
     pub fn duplicate_selection(&mut self) {
@@ -356,6 +368,9 @@ impl EditorApp {
         let mut copies = Vec::new();
         for id in sources {
             if let Some(copy) = self.scene.duplicate(id) {
+                if let Some(node) = self.scene.find_mut(copy) {
+                    node.name = format!("{} copy", node.name);
+                }
                 let start = self.scene.world_transform(copy).unwrap_or_default();
                 self.apply_world_delta(&[(copy, start)], offset);
                 copies.push(copy);
@@ -447,7 +462,8 @@ impl EditorApp {
     // --- Frame ---------------------------------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        // Keys belong to a text field being edited, or to a question waiting for an answer.
+        if ctx.egui_wants_keyboard_input() || self.scenes_ui.confirm_delete.is_some() {
             return;
         }
         let (cmd, cmd_shift) = (Modifiers::COMMAND, Modifiers::COMMAND | Modifiers::SHIFT);
