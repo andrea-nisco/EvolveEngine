@@ -2,6 +2,7 @@
 name = "evolve_engine"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 glam = { version = "0.34.1", features = ["serde"] }

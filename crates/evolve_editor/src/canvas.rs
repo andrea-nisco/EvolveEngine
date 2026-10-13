@@ -62,7 +62,8 @@ impl EditorApp {
         }
     }
 
-    /// Mouse wheel zooms at the cursor, middle drag (or Space + drag) pans, right drag rotates the view.
+    /// Mouse wheel zooms at the cursor, a trackpad's two-finger scroll pans and its pinch zooms, middle drag
+    /// (or Space + drag) pans, right drag rotates the view.
     fn navigate(&mut self, ui: &egui::Ui, response: &egui::Response) {
         let rect = response.rect;
         let cursor = ui.input(|i| i.pointer.latest_pos()).map_or(self.camera.viewport * 0.5, |p| to_vec2(p - rect.min));
@@ -76,8 +77,18 @@ impl EditorApp {
             self.camera.rotate_at(cursor, delta.x * 0.005);
         }
         if response.hovered() {
-            let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
-            let factor = (scroll * 0.0025).exp() * pinch;
+            let units = ui.input(|i| {
+                i.events.iter().filter_map(|e| if let egui::Event::MouseWheel { unit, .. } = e { Some(*unit) } else { None }).collect::<Vec<_>>()
+            });
+            self.canvas.trackpad_scroll = is_trackpad_scroll(self.canvas.trackpad_scroll, &units);
+            // Pinch and Cmd / Ctrl + scroll arrive as zoom_delta; plain scrolling as smooth_scroll_delta.
+            let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+            let mut factor = pinch;
+            if self.canvas.trackpad_scroll {
+                self.camera.pan_by_screen(to_vec2(scroll));
+            } else {
+                factor *= (scroll.y * 0.0025).exp();
+            }
             if (factor - 1.0).abs() > 1e-4 {
                 self.camera.zoom_at(cursor, factor);
             }
@@ -177,5 +188,27 @@ impl RenderTarget {
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
             painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
         }
+    }
+}
+
+/// Whether scrolling comes from a trackpad: those report pixel-precise deltas, a mouse wheel reports lines.
+/// The device that sent the most recent wheel event decides (trackpads go on sending events for a moment
+/// after the fingers lift, as kinetic scrolling).
+fn is_trackpad_scroll(previous: bool, units: &[egui::MouseWheelUnit]) -> bool {
+    units.last().map_or(previous, |unit| *unit == egui::MouseWheelUnit::Point)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::MouseWheelUnit::{Line, Point};
+
+    #[test]
+    fn the_latest_wheel_event_decides_between_trackpad_and_mouse_wheel() {
+        assert!(is_trackpad_scroll(false, &[Point]));
+        assert!(!is_trackpad_scroll(true, &[Line]));
+        assert!(!is_trackpad_scroll(false, &[Point, Line]), "a wheel notch right after trackpad events is the wheel");
+        assert!(is_trackpad_scroll(true, &[]), "no events this frame: the smoothing tail keeps its meaning");
+        assert!(!is_trackpad_scroll(false, &[]));
     }
 }

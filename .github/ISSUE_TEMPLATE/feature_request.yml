@@ -1,0 +1,32 @@
+name: Feature request
+description: An idea for something EvolveEngine should do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the game or workflow, not only the feature. Knowing the problem lets us find the best fix.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Where do you think it belongs?
+      description: EvolveEngine is meant to be changed by its users. Features that only some games need can live in an extension instead of the core.
+      options:
+        - In the core, everyone needs it
+        - As an extension, only some games need it
+        - I am not sure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you tried

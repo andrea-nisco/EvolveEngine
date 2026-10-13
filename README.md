@@ -3,13 +3,32 @@
 A vector-first 2D game editor written in Rust. Everything on screen is drawn straight from Bézier data at the
 display's resolution, so artwork stays razor sharp at any zoom level.
 
-It follows [vector_game_engine_development_roadmap.md](vector_game_engine_development_roadmap.md).
-All six roadmap phases are implemented. See [Status](#status) for the details and the limits, and
-[TODO.md](TODO.md) for everything that was left out or simplified, phase by phase.
+EvolveEngine is free and open source ([MIT](LICENSE)). The idea behind it: an editor should not be fixed. It is meant
+to be a solid base that you change, together with your game, to fit what your game needs (see
+[Where this is going](#where-this-is-going)).
 
-## Run
+The original six roadmap phases are implemented. See [Status](#status) for the details and the limits, and
+[TODO.md](TODO.md) for the plan and for everything that was left out or simplified.
 
-Requires the Rust toolchain (and the MSVC C++ Build Tools on Windows).
+## Download
+
+Ready-made builds for Windows, macOS (Apple Silicon) and Linux (x86-64) are attached to each release on the
+repository's Releases page. Unpack the archive anywhere and start `evolve_editor`. It contains the editor, the player
+(needed by *Export Game*) and the web player (needed by *Export for Web*), all in one folder: keep them together.
+
+The programs are not code-signed yet, so the system warns on first start:
+- **Windows:** SmartScreen says "Windows protected your PC": choose *More info* → *Run anyway*.
+- **macOS:** "cannot be opened because the developer cannot be verified". Either right-click the program → *Open*, or
+  remove the download mark once: `xattr -dr com.apple.quarantine <the unpacked folder>`.
+- **Linux:** nothing to do; if your file manager dropped the executable bit, `chmod +x evolve_editor evolve_player`.
+
+## Build from source
+
+Runs on Windows, macOS and Linux. Requires the [Rust toolchain](https://rustup.rs), plus:
+- Windows: the MSVC C++ Build Tools.
+- macOS: the Xcode command line tools (`xcode-select --install`).
+- Linux: a C compiler and the usual window-system development packages
+  (on Debian / Ubuntu: `sudo apt install build-essential pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev`).
 
 ```
 cargo build --release --workspace     # the editor and the standalone player
@@ -21,7 +40,8 @@ For *Export for Web*, build the browser player once (needs `rustup target add wa
 `cargo install wasm-bindgen-cli --version 0.2.129 --locked`):
 
 ```
-powershell -ExecutionPolicy Bypass -File tools/build-web-player.ps1
+powershell -ExecutionPolicy Bypass -File tools/build-web-player.ps1   # Windows
+tools/build-web-player.sh                                              # macOS, Linux
 ```
 
 ## Using the editor
@@ -61,10 +81,11 @@ scenes starts a fresh history). Scripts move between scenes: `next_scene()` goes
 | Rect / Ellipse (`R` / `E`) | Drag to draw. `Shift` = square/circle, `Alt` = from center. |
 | Pencil (`N`) | Draw freehand; the stroke is simplified into smooth curves. |
 
-**View:** mouse wheel zooms at the cursor · middle-drag or `Space`+drag pans · right-drag rotates the view ·
+**View:** mouse wheel zooms at the cursor · middle-drag or `Space`+drag pans · right-drag rotates the view · on a
+trackpad (a Mac, or a precision touchpad) two-finger scroll pans, pinch or `Cmd`/`Ctrl`+scroll zooms ·
 `Home` fits the camera frame · `F` zooms to the selection.
 
-**Edit:** `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo · `Ctrl+X` / `Ctrl+C` / `Ctrl+V` cut, copy, paste (`Ctrl+Shift+V`
+**Edit** (on macOS read `Ctrl` as `Cmd`)**:** `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo · `Ctrl+X` / `Ctrl+C` / `Ctrl+V` cut, copy, paste (`Ctrl+Shift+V`
 pastes in place; copies also go to the system clipboard, so you can paste into another editor window, and pasting
 SVG text imports the drawing) · `Ctrl+D` duplicate · `Ctrl+G` / `Ctrl+Shift+G` group/ungroup ·
 `Ctrl+J` combine into a compound path · `[` / `]` send backward / bring forward · `Del` delete.
@@ -164,17 +185,19 @@ run until the object is shown. The copies are visible and active at once, and th
 frame. (The function is called `instantiate` because `spawn` is a reserved word in Rhai.)
 
 **Exporting a game (File menu):**
-- *Export Game (desktop)...* writes one standalone `.exe`: the player program with your project built into it.
-  Send it to anyone; it needs no editor and no project file. `F11` toggles fullscreen. The game is scaled to fit
-  the window.
+- *Export Game (desktop)...* writes one standalone program (`.exe` on Windows): the player program with your project
+  built into it. Send it to anyone; it needs no editor and no project file. `F11` toggles fullscreen. The game is
+  scaled to fit the window. On macOS the result is an application bundle (`game.app`, a folder that Finder shows as one
+  app). It is signed ad hoc, so it opens normally on your Mac; people who download it get the same "developer cannot
+  be verified" warning as for the editor (right-click → *Open*, or `xattr -dr com.apple.quarantine game.app`).
 - *Export for Web (HTML)...* writes a folder with `index.html`, `evolve_player.js` and `evolve_player_bg.wasm`.
   Serve it over http to play (browsers don't allow WebAssembly modules from `file://`), for example with
   `python -m http.server` in that folder, or upload it to any static web host.
 - Both need the player to be built once (see below). The editor finds it next to its own executable
-  (`evolve_player.exe`) and in `dist/web-player`.
+  (`evolve_player.exe` on Windows, `evolve_player` elsewhere) and in `dist/web-player`.
 - The browser player is about 6.5 MB (about 1.7 MB when your web host compresses it, which most do). It is built
   with a size-optimized profile and without egui's bundled fonts, since a game only draws vectors.
-- From a script: `evolve_editor --export-desktop game.evolve out.exe`, `evolve_editor --export-web game.evolve out-folder`,
+- From a script: `evolve_editor --export-desktop game.evolve out`, `evolve_editor --export-web game.evolve out-folder`,
   `evolve_editor --export-png game.evolve out.png [scale]`, `evolve_editor --export-svg game.evolve out.svg` (these two
   use the project's start scene) and `evolve_editor --sample demo.evolve` (writes the demo project).
   `evolve_player game.evolve` plays a project file directly. An exported game contains all scenes and starts at the
@@ -192,7 +215,14 @@ from older versions (one scene, or a screen size and color instead of a camera) 
 that frames the old screen. *File → Import SVG* brings
 in paths, groups, strokes and gradients. A title ending in `*` means unsaved changes: New, Open and closing the
 window ask whether to save first. While you have unsaved changes the editor also writes a recovery copy every 30
-seconds (in `%LOCALAPPDATA%\EvolveEngine`); if the editor ever closes unexpectedly, the next start offers to recover it.
+seconds (in `%LOCALAPPDATA%\EvolveEngine` on Windows, `~/Library/Application Support/EvolveEngine` on macOS,
+`~/.local/share/EvolveEngine` on Linux); if the editor ever closes unexpectedly, the next start offers to recover it.
+
+**Project file versions:** your projects will keep opening. The format has a version number, and every new editor opens
+files of all older versions and upgrades them when it loads them (an editor never silently loses an old project).
+The reverse is not true: a file saved by a newer editor is refused by an older one, with a message.
+Version 1: one scene, screen size and color on the scene · 2: a camera object replaces the screen · 3 (current):
+several scenes per project.
 
 The Objects panel shows the scene tree (drag rows to re-order or re-parent, eye/lock toggles, double-click to
 rename) and the Inspector shows the properties of the selection: position and size, opacity, fill and stroke (solid,
@@ -267,3 +297,14 @@ The engine crate has no dependency on the editor, so a game runtime can reuse it
 | 6.1 Play / Pause / Stop in the viewport, debug overlays | Done (colliders, anchors, fps and draw statistics) |
 | 6.2 Export: standalone desktop and web (WebAssembly/HTML5) builds | Done. Desktop = player + project in one exe; web = folder with index.html, JS and WASM (about 6.5 MB, 1.7 MB gzipped) |
 | Editor structure | Dockable Objects / Scene / Game / Inspector panels, a camera object per scene, and several scenes per project with script-driven transitions (added after the roadmap, see [TODO.md](TODO.md) for the limits) |
+
+## Where this is going
+
+The goal is a complete, free editor that people can start from and then *evolve*: add panels, tools, inspector fields
+and commands that their own game needs, and keep those changes together with the game's project. Today the editor is
+a fixed set of features; making it extensible is the next big step. The plan is in [TODO.md](TODO.md) and the way to
+help is in [CONTRIBUTING.md](CONTRIBUTING.md) (please read the [Code of Conduct](CODE_OF_CONDUCT.md) too).
+
+## License
+
+[MIT](LICENSE) © 2026 Andrea Nisco

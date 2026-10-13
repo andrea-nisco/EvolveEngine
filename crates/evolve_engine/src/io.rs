@@ -13,7 +13,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Version 2 added the camera object, version 3 several scenes per project. Older files are
 /// upgraded when they are loaded: a version 1 or 2 file becomes a project with one scene.
-const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct ProjectFile {

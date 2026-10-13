@@ -4,8 +4,9 @@ Things that unit tests do not cover. Tick them off while running the editor (`ca
 and note the date and any bug next to a failed line. Untick everything to reuse the list as a regression
 check after larger changes.
 
-Status: "Scenes and cameras" and the first two PNG sequence lines were checked by hand on 2026-10-13.
-Still open: the four renaming lines, the clean-finish line and the second-sequence line of the PNG export.
+Status: "Scenes and cameras", "Renaming and duplicating" and "PNG sequence export" were checked by hand on 2026-10-13 and
+passed. "Navigating the Scene view (trackpad and mouse)" was checked on a Mac trackpad on 2026-10-13 and passed;
+the mouse wheel on Windows is still to be re-checked once. "Exporting a game" is new and open.
 
 ## Scenes and cameras
 
@@ -44,10 +45,10 @@ shape so they are easy to tell apart. A is the start scene.
 
 ## Renaming and duplicating
 
-- [ ] Double-click a scene in the Scenes panel, type a name, press Enter: the name is saved and the box closes.
-- [ ] Same, but click somewhere else instead of Enter: the name is saved.
-- [ ] Same, but press `Esc`: the old name stays.
-- [ ] Rename an object (including the camera) in the Objects panel: Enter closes the box and the name stays.
+- [x] Double-click a scene in the Scenes panel, type a name, press Enter: the name is saved and the box closes.
+- [x] Same, but click somewhere else instead of Enter: the name is saved.
+- [x] Same, but press `Esc`: the old name stays.
+- [x] Rename an object (including the camera) in the Objects panel: Enter closes the box and the name stays.
 - [x] Duplicate an object (`Ctrl+D` or the row menu): the copy is called "<name> copy". Duplicating a scene
       does the same.
 
@@ -61,5 +62,30 @@ Cancel.
       responsive (move the pointer, switch tabs) and the count goes up.
 - [x] **Cancel** mid-way: the window closes, the status line says how many frames were written, and the
       files that were written are on disk.
-- [ ] A finished export reports "Exported N frames" and the folder holds N numbered PNGs.
-- [ ] Starting a second sequence while one runs is refused with a status message.
+- [x] A finished export reports "Exported N frames" and the folder holds N numbered PNGs.
+- [x] Starting a second sequence while one runs is refused with a status message.
+
+## Navigating the Scene view (trackpad and mouse)
+
+Setup: the Scene view open on any scene. On a Mac with a trackpad (or a Windows precision touchpad, where only the
+pinch and `Space`+drag lines apply, because Windows reports touchpad scrolling like a mouse wheel).
+
+- [x] **Two-finger scroll** over the Scene view moves the view in any direction, following the fingers; letting go
+      glides to a stop and does not zoom.
+- [x] **Pinch** zooms at the cursor.
+- [x] **`Cmd` + two-finger scroll** (up / down) zooms at the cursor.
+- [x] A **mouse wheel** (a real mouse, not the trackpad) still zooms at the cursor. Using the wheel right after the
+      trackpad, and the other way round, switches behaviour without sticking.
+- [x] `Space` + drag with one finger (press-and-hold the trackpad button, or tap-and-drag) pans too.
+- [x] Right-drag rotates the view; on a Mac that is `Ctrl` + click-drag, or a two-finger click if enabled in System Settings.
+
+## Exporting a game
+
+Setup: the built-in sample project, and a release build next to its player (`cargo build --release --workspace`, then
+`cargo run -p evolve_editor --release`).
+
+- [ ] *File → Export Game (desktop)...* proposes `game.app` on macOS (`game.exe` on Windows, `game` on Linux). Choose a
+      folder and Save: the status line reports the export.
+- [ ] Double-click the exported game in Finder / Explorer: it opens without the editor and plays the sample. Exporting
+      again to the same name replaces it.
+- [ ] macOS only: copy the `.app` to another folder and open it from there; it still plays.

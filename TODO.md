@@ -1,9 +1,112 @@
-# EvolveEngine: open items
+# EvolveEngine: plan and open items
 
-Everything the roadmap asked for is implemented (see [README.md](README.md)). This file collects what was
-**left out, simplified or only lightly tested** in each phase, so it can be picked up later.
+**The goal:** a complete, free, open-source (MIT) 2D game editor that people can start from and then *evolve*: change
+the editor itself, together with their game, to fit what that game needs. So the plan has two halves: a base that is
+complete enough to really use, and an editor that is built to be changed.
 
-`- [ ]` open · **(!)** worth doing first · *italics* = a known limit that is a deliberate trade-off, not a bug
+`- [ ]` open · `- [x]` done · **(!)** worth doing first · *italics* = a known limit that is a deliberate trade-off, not a bug
+
+## The plan, in order
+
+### Phase 1: open-source foundation (before announcing anything)
+
+**Done**
+
+- [x] MIT licence ([LICENSE](LICENSE)), `license` in every Cargo.toml.
+- [x] Continuous integration ([ci.yml](.github/workflows/ci.yml)): build + test on Windows, macOS and Linux, clippy
+      with warnings denied, and the wasm web player.
+- [x] Prebuilt downloads: [release.yml](.github/workflows/release.yml) builds the editor, the player and the web player
+      for Windows, macOS (Apple Silicon) and Linux on a `v*` tag and attaches them to a **draft** release for you to
+      review; [tools/package-release.sh](tools/package-release.sh) does the packing (checked on the Mac: the package
+      unpacks, keeps its executable bits, and its editor exports a game).
+- [x] macOS: builds and passes the tests; autosave / layout folder follows each platform's convention
+      (`~/Library/Application Support`, `~/.local/share`, `%LOCALAPPDATA%`); `tools/build-web-player.sh`; trackpad
+      navigation in the Scene view (two-finger scroll pans, pinch and `Cmd`+scroll zoom, a mouse wheel still zooms;
+      checked by hand on a trackpad).
+- [x] *Export Game (desktop)* on macOS writes a `.app` bundle (the untouched player plus the project as a resource,
+      ad-hoc signed) instead of appending to the program, which had broken the signature. Checked on the Mac: the
+      bundle passes `codesign --verify --strict`, `open` launches it and it plays its game. Unit-tested everywhere.
+- [x] Project-format stability: a frozen fixture per format version
+      ([tests/fixtures](crates/evolve_engine/tests/fixtures)) that must always open, a test that the writer's output for
+      the current version does not change without a version bump, and the rules in CONTRIBUTING.md and the README.
+      Checked by deliberately breaking the format twice (both caught). *Fixtures v1 and v2 are reconstructed from v3, not
+      genuine old files; if you have real ones from early editors, add them next to these.*
+- [x] Community files: [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), issue forms (bug
+      report, feature request), a pull-request checklist, [CHANGELOG.md](CHANGELOG.md), a README for newcomers.
+      *Private conduct reports go to the repository owner's profile contact; replace that with a dedicated address or
+      GitHub's private reporting if you prefer.*
+- [x] Hand tests (2026-10-13, reported by the author): [MANUAL_TESTS.md](MANUAL_TESTS.md) passes, and the Pen tool,
+      Pencil tool, Bézier handle dragging and IK target dragging work.
+- *Decisions:* no Intel Mac build (Apple is retiring Intel Macs); no code signing or notarization for now, so the
+  SmartScreen / Gatekeeper warnings described in the README stay.
+
+**Open: needs a person or another machine**
+
+- [ ] **(!)** Push to a public repository, then fix whatever the first CI run reports (Linux packages and versions in
+      particular), try the release workflow with "Run workflow" before the first tag, and see that the issue forms show up.
+- [ ] Run the editor on Linux by hand (never done) and fix what shows up.
+- [ ] On Windows, once: the mouse wheel still zooms in the Scene view (the trackpad change touched that code).
+- [ ] On the Mac, once: *File → Export Game* from the editor's own save dialog (the dialog is not covered by tests;
+      the "Exporting a game" section of [MANUAL_TESTS.md](MANUAL_TESTS.md)).
+- [ ] Optional: map the trackpad's two-finger twist (egui reports it as a rotation) to rotating the view, so a Mac never
+      needs a right button; the rotation direction has to be checked on a real trackpad.
+
+### Phase 2: extensibility (what makes this product different)
+
+Today panels and tools are closed lists in the code ([layout.rs](crates/evolve_editor/src/layout.rs) `Pane`,
+[tools.rs](crates/evolve_editor/src/tools.rs) `Tool`), scripts only run inside the game, a project is one JSON file and
+an object has only the built-in physics body and one script. None of that lets a user change the editor.
+The decision: **a clean Rust core (fork and recompile works) plus editor extensions written in Rhai that travel with the
+project.** Keep the core small and build features such as tilemaps and particles as first-party extensions, which proves
+the system and documents it.
+
+1. [ ] **(!)** Registries: panels, tools, menu commands, inspector sections and asset kinds register themselves instead
+       of being enum variants; the built-in ones become the first users. Do this first: every feature added before it
+       makes it more expensive.
+2. [ ] **(!)** Project folder format: the project JSON plus `assets/` and `extensions/` next to it (a single `.evolve`
+       file keeps working). Also the natural place for images, sounds and shared scripts.
+3. [ ] Editor scripting API: Rhai extensions that add menu commands, panels with simple UI, tools and batch operations
+       on the scene; loaded from the project's `extensions/` folder, hot-reloaded, errors shown in the Console.
+4. [ ] Custom components / properties on objects with an automatic Inspector UI (a game's own data: health, inventory,
+       dialogue). Today an object cannot carry anything but the built-ins.
+5. [ ] Extension manager panel, documented example extensions, a versioned and documented extension API.
+6. [ ] Later, if people ask: native or WASM plugins for other languages.
+
+### Phase 3: the baseline every game needs
+
+- [ ] **(!)** Physics: box and polygon bodies, rotation, continuous collision detection, kinematic bodies (moving
+      platforms), collision layers, one-way platforms, joints. (Details in "Phase 5" below.)
+- [ ] **(!)** Audio: sound assets, a playback API for scripts, export bundling. A tool without sound cannot ship a game.
+- [ ] **(!)** Input: all mouse buttons, wheel, touch (also needed for the web export), gamepad, text input.
+- [ ] **(!)** Save data: globals are lost when the game closes.
+- [ ] **(!)** Text and UI: there is no text object at all, and nearly every game needs labels and menus.
+- [ ] **(!)** Script API gaps: timers (`after(seconds, fn)`), remove / disable nodes, parent and children access,
+      `on_collision_end`, seeded random.
+- [ ] Raster images (PNG / JPG) as a kind of object, for people who mix art styles.
+- [ ] Benchmark the CPU renderer on 4K screens and large scenes; add a render-scale option or the GPU renderer if it
+      disappoints. Profile the per-frame costs listed under "Cross-cutting" before fixing them.
+
+### Phase 4: authoring comfort
+
+- [ ] Align and distribute; more shape tools (rounded rectangle, polygon, star, line, arc); Node tool marquee and
+      multi-anchor move; snapping while scaling, rotating and drawing.
+- [ ] Timeline: zoom and scroll, multi-key selection, copy / paste keys, snap to keys.
+- [ ] A project-wide asset library (symbols and clips belong to one scene today).
+- [ ] Undo for scene-list changes, and an undo history that survives switching scenes.
+- [ ] Script editor basics: line numbers, jump to the error, syntax highlighting.
+- [ ] Play mode: hot-reload of scripts, frame step, time scale, restart without leaving Play mode.
+
+### Phase 5: growth
+
+- [ ] Export presets (resolution, fullscreen, window title), application icon, web loading screen and fullscreen button.
+- [ ] Example projects and templates, a tutorial, a documentation site.
+- [ ] Settings dialog (grid size, theme, shortcuts), shortcut cheat sheet, localization, accessibility.
+
+### Deferred
+
+GPU renderer (unless the benchmark says otherwise), PDF export, Android / iOS wrappers, blend modes and group effects,
+dashed strokes, gradient spread modes. Everything below is the detailed list of known limits per area; the plan above
+picks from it.
 
 ---
 
@@ -76,8 +179,10 @@ All six were completed in the second round of work:
   prompt (Cancel and Don't save), autosave, crash recovery (Recover).
 - Not reproduced: the view zoom jumped from 54% to 89% once during the session; it did not happen again in
   repeated runs of the same steps (possibly stray mouse-wheel input). Keep an eye out for it.
-- Still not tried by hand: the Pen and Pencil tools, dragging Bézier handles, Alt-erase in the Weights tool,
-  Shift-move and Alt-stretch of bones, dragging an IK target, the timeline with Auto-key on skinned or morphing shapes.
+- Tried by hand later (2026-10-13, reported by the author): the Pen and Pencil tools, dragging Bézier handles and
+  dragging an IK target all work.
+- Still not tried by hand: Alt-erase in the Weights tool, Shift-move and Alt-stretch of bones, the timeline with
+  Auto-key on skinned or morphing shapes.
 
 ---
 
@@ -185,8 +290,8 @@ All six were completed in the second round of work:
 - [ ] Web export: loading screen, further size reductions (rhai features, trimming egui; the wasm is now 6.5 MB,
       about 1.7 MB gzipped), touch input, fullscreen button, a ready-made
       local test server script, hosting guide. *Needs an http server; it cannot run from `file://`.*
-- [ ] Other platforms: macOS and Linux builds and `.app` / AppImage packaging (the code is portable but only
-      Windows has been built and run). Android / iOS wrappers.
+- [ ] Other platforms: macOS builds and runs (checked 2026-10-13); `.app` and AppImage packaging, and the Linux
+      editor run, are still to do (see Phase 1). Android / iOS wrappers.
 - [ ] Audio: sound assets, playback API for scripts, export bundling.
 - [ ] Export presets (resolution, fullscreen, window title) stored in the project.
 
@@ -195,9 +300,8 @@ All six were completed in the second round of work:
 - [ ] **GUI testing:** the main paths of the Node, Bone and Weights tools were tried by hand (see above), but the
       remaining ones listed there were not. Add a manual checklist or UI-level tests. Keep GUI automation safe: confirm
       the target window is in front before every input event (the helper used for the second round does this).
-- [ ] Continuous integration: `cargo test`, `cargo clippy`, wasm build on every push. No git repository exists yet
-      (`git init`, first commit).
-- [ ] Licence file, contributing notes, changelog.
+- [x] Continuous integration (workflow written, see Phase 1) and git repository.
+- [x] Licence file and contributing notes. [ ] Changelog.
 - [ ] Example projects and a short tutorial (the built-in sample is the only example).
 - [ ] Performance: the history compares the whole scene every frame, clip preview clones the scene each frame,
       thumbnails are all redrawn on any change, physics re-flattens static outlines every step.

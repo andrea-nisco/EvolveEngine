@@ -48,6 +48,8 @@ pub struct CanvasState {
     pub cursor: Option<Vec2>,
     pub guides: Vec<Guide>,
     pub needs_frame: bool,
+    /// The last scroll input came from a trackpad (or other pixel-precise device), not a mouse wheel.
+    pub trackpad_scroll: bool,
 }
 
 #[derive(Default)]
@@ -125,6 +127,7 @@ impl EditorApp {
                 cursor: None,
                 guides: Vec::new(),
                 needs_frame: true,
+                trackpad_scroll: false,
             },
             tree: TreeState::default(),
             assets: AssetsState::default(),
@@ -296,7 +299,13 @@ impl EditorApp {
             self.status = "The player is missing next to the editor. Build it with: cargo build --release -p evolve_player".into();
             return;
         };
-        let default_name = if cfg!(windows) { "game.exe" } else { "game" };
+        let default_name = if cfg!(windows) {
+            "game.exe"
+        } else if cfg!(target_os = "macos") {
+            "game.app"
+        } else {
+            "game"
+        };
         let Some(output) = rfd::FileDialog::new().set_title("Export game").set_file_name(default_name).save_file() else { return };
         self.sync_open_scene();
         let result = io::project_to_string(&self.project).and_then(|json| bundle::export_desktop(&player, &json, &output));
@@ -309,7 +318,7 @@ impl EditorApp {
     /// Saves a folder with `index.html` that plays the game in a browser.
     pub fn export_web_dialog(&mut self) {
         let Some(player_dir) = bundle::find_web_player_dir() else {
-            self.status = "The web player is not built yet. Run tools/build-web-player.ps1 once".into();
+            self.status = "The web player is not built yet. Run tools/build-web-player.ps1 (Windows) or .sh (macOS, Linux) once".into();
             return;
         };
         let Some(folder) = rfd::FileDialog::new().set_title("Export for web: choose a folder").pick_folder() else { return };

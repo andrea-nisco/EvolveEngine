@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work, or works differently from what you expect
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time. The more exact the steps, the faster it gets fixed.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the sample project
+        2. Select the Pen tool
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release you downloaded, or the commit if you built it from source.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: project
+    attributes:
+      label: Project file or screenshot
+      description: A `.evolve` file is plain JSON, so you can attach the smallest one that still shows the problem. Drag files in here.
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output or error message
+      render: text

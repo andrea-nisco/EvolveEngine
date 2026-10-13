@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! evolve_editor --sample <out.evolve>                   write the demo project
-//! evolve_editor --export-desktop <in.evolve> <out.exe>  build a standalone game
+//! evolve_editor --export-desktop <in.evolve> <out>      build a standalone game (<out>.exe on Windows, <out>.app on macOS)
 //! evolve_editor --export-web <in.evolve> <out-folder>   build a browser game
 //! evolve_editor --export-png <in.evolve> <out.png> [scale]  render what the camera of the start scene sees
 //! evolve_editor --export-svg <in.evolve> <out.svg>      write the start scene as SVG
@@ -55,7 +55,7 @@ fn export_desktop(project: &str, out: &str) -> io::Result<String> {
 }
 
 fn export_web(project: &str, out: &str) -> io::Result<String> {
-    let player_dir = bundle::find_web_player_dir().ok_or("the web player is not built (tools/build-web-player.ps1)")?;
+    let player_dir = bundle::find_web_player_dir().ok_or("the web player is not built (tools/build-web-player.ps1 or .sh)")?;
     let json = io::project_to_string(&io::load_project(Path::new(project))?)?;
     bundle::export_web(&player_dir, &json, Path::new(out))?;
     Ok(format!("exported {out}"))
