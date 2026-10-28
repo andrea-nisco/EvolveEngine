@@ -2,6 +2,7 @@
 name = "evolve_player"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Standalone player for EvolveEngine projects (desktop and web)."
 
 [lib]

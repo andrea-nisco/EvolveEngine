@@ -17,26 +17,40 @@ impl EditorApp {
         painter.rect_filled(area, 0.0, Color32::from_gray(10));
 
         // What is shown: the running game, an animation preview, or the scene being edited.
-        let clip_preview = self.playback_scene();
+        let clip_preview = self.anim.preview.clone();
         let game = self.play.as_ref().map(|p| p.runtime.scene());
-        let shown = game.as_deref().or(clip_preview.as_ref()).unwrap_or(&self.scene);
+        let shown = game.as_deref().or(clip_preview.as_deref()).unwrap_or(&self.scene);
         let camera = shown.camera_view();
 
         // The camera's frame, as large as fits, centered (bars where the shapes differ).
         let (frame, scale) = fit(camera.size, area.shrink(4.0));
-        self.canvas.game_target.paint(&painter, frame, Color32::BLACK, shown, |pixels| camera.view_matrix(pixels), TextureOptions::LINEAR);
+        let drawing = std::time::Instant::now();
+        self.canvas.game_target.paint(&painter, frame, Color32::BLACK, shown, |pixels| camera.view_matrix(pixels), TextureOptions::LINEAR, &self.renderers, "Game view");
 
-        // Where the pointer is in the world, through the camera: this is the game's mouse.
-        let pointer = response.hover_pos();
+        // Where the pointer is in the world, through the camera: this is the game's mouse. A drag with the right button that began over
+        // the picture goes on being followed outside it (the game would otherwise see the mouse jump away).
+        // (`hover_pos` is empty while a button is held on something else; `contains_pointer` says where the pointer is regardless.)
+        let hovering = if response.contains_pointer() { ui.input(|i| i.pointer.latest_pos()) } else { None };
+        let (pressed, held) = ui.input(|i| (i.pointer.button_pressed(egui::PointerButton::Secondary), i.pointer.button_down(egui::PointerButton::Secondary)));
+        if hovering.is_some() && pressed {
+            self.canvas.game_drag = true;
+        }
+        if !held {
+            self.canvas.game_drag = false;
+        }
+        let pointer = hovering.or_else(|| if self.canvas.game_drag { ui.input(|i| i.pointer.latest_pos()) } else { None });
         self.canvas.game_cursor = pointer.map(|p| {
             let in_frame = Vec2::new((p.x - frame.left()) / scale, (p.y - frame.top()) / scale);
             camera.view_matrix(camera.size).inverse().transform_point2(in_frame)
         });
         drop(game);
+        self.frame_stats.add("Game view: drawing the scene", drawing.elapsed());
 
         if self.play.is_some() {
+            let overlays = std::time::Instant::now();
             let view = Camera::matching(&camera, Vec2::new(frame.width(), frame.height()));
             self.paint_game_overlays(&painter, frame, &view, true);
+            self.frame_stats.add("Game view: overlays", overlays.elapsed());
         }
     }
 

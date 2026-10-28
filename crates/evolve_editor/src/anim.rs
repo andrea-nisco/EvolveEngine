@@ -7,7 +7,10 @@
 use crate::app::EditorApp;
 use eframe::egui;
 use evolve_engine::animation::{Clip, Property};
+use evolve_engine::revision::Revs;
+use evolve_engine::rig::Ik;
 use evolve_engine::scene::Scene;
+use std::sync::Arc;
 
 /// What the pointer is doing in the timeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +35,22 @@ pub struct AnimState {
     pub drag: Option<TimelineDrag>,
     /// What was last written into the scene, to know when to do it again.
     applied: Option<(usize, f32, Clip)>,
+    /// The scene as posed at the playhead while a clip plays. One copy of the scene is made when playback starts (and again when the
+    /// scene, the clip or the IK constraints change) and posed anew in every frame; it is shared by the Scene and Game views. (A
+    /// copy for each frame cost 12 to 14 ms on the big scenes, and to the GPU renderer every copy was another scene, to be walked
+    /// from the start.)
+    pub preview: Option<Arc<Scene>>,
+    /// What `preview` was copied from.
+    preview_of: Option<PreviewSource>,
+}
+
+/// What a preview copy stands for: the stamps of the scene, the clip that plays (its index and its content) and the IK constraints.
+#[derive(Clone, PartialEq)]
+struct PreviewSource {
+    revs: Revs,
+    clip: usize,
+    content: Clip,
+    ik: Vec<Ik>,
 }
 
 impl Default for AnimState {
@@ -46,6 +65,8 @@ impl Default for AnimState {
             selected_key: None,
             drag: None,
             applied: None,
+            preview: None,
+            preview_of: None,
         }
     }
 }
@@ -120,8 +141,9 @@ impl EditorApp {
         self.anim.timeline_visible && self.delete_selected_key()
     }
 
-    /// A copy of the scene showing the animation at the playhead (with IK solved).
-    /// Playback draws this copy, so the real scene is never modified by it.
+    /// A new copy of the scene showing the animation at the playhead (with IK solved). Playback draws a copy, so the real scene is never
+    /// modified by it. (`update_preview` keeps one copy and poses it again; this is what that copy must look like.)
+    #[cfg(test)]
     pub fn playback_scene(&self) -> Option<Scene> {
         if !self.anim.playing {
             return None;
@@ -131,6 +153,34 @@ impl EditorApp {
         posed.apply_pose(&pose);
         posed.solve_ik();
         Some(posed)
+    }
+
+    /// Makes the preview for this frame (nothing unless a clip is playing): the copy of the scene is posed at the playhead again. The
+    /// copy is made anew only when what it was made from changed. Every pose it is given sets the same properties of the same nodes,
+    /// so nothing of an earlier pose is left in it, except the bones of IK chains, which are given back their transforms from the
+    /// scene before the chains are solved again (the solver starts from where the bones are).
+    pub fn update_preview(&mut self) {
+        let Some(clip) = self.current_clip().filter(|_| self.anim.playing) else {
+            self.anim.preview = None;
+            self.anim.preview_of = None;
+            return;
+        };
+        let source = PreviewSource { revs: self.scene.revision(), clip: self.anim.clip, content: clip.clone(), ik: self.scene.ik.clone() };
+        let pose = clip.pose_at(&self.scene, self.anim.time);
+        match self.anim.preview.as_mut() {
+            Some(preview) if self.anim.preview_of.as_ref() == Some(&source) => {
+                // The IK bones start from where the scene has them, as in a copy.
+                self.scene.copy_ik_bones_to(Arc::make_mut(preview));
+            }
+            _ => {
+                self.anim.preview = Some(Arc::new(self.scene.clone()));
+                self.anim.preview_of = Some(source);
+            }
+        }
+        let Some(preview) = self.anim.preview.as_mut() else { return };
+        let preview = Arc::make_mut(preview);
+        preview.apply_pose(&pose);
+        preview.solve_ik();
     }
 
     pub fn toggle_play(&mut self) {

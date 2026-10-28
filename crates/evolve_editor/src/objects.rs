@@ -107,9 +107,7 @@ impl EditorApp {
         // Clicking the empty space deselects, and right-clicking it opens the create menu.
         // The background is registered first so the rows on top of it win the pointer.
         let background = ui.interact(ui.available_rect_before_wrap(), ui.id().with("objects_background"), Sense::click());
-        egui::ScrollArea::vertical().id_salt("tree").auto_shrink([false, false]).show(ui, |ui| {
-            self.scene_tree(ui);
-        });
+        self.scene_tree(ui);
         if background.clicked() {
             self.selection.clear();
         }

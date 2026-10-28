@@ -1,5 +1,5 @@
-//! Desktop player. Starts the game appended to this executable, or the `.evolve` project given on
-//! the command line, or asks for a project file.
+//! Desktop player. Starts the game appended to this executable (or stored in its macOS `.app` bundle), or the
+//! `.evolve` project given on the command line, or asks for a project file.
 
 #[cfg(target_arch = "wasm32")]
 fn main() {} // the browser build uses the library's `start` function instead
@@ -12,7 +12,7 @@ fn main() -> eframe::Result {
 
     let loaded = std::env::current_exe()
         .ok()
-        .and_then(|exe| bundle::read_embedded(&exe))
+        .and_then(|exe| bundle::read_project_for(&exe))
         .map(|json| io::parse_project(&json))
         .or_else(|| {
             let path = std::env::args().nth(1).map(PathBuf::from).or_else(|| {

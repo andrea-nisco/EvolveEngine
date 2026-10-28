@@ -2,13 +2,20 @@
 name = "evolve_editor"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 eframe = "0.36.2"
 egui_dock = { version = "0.21.1", features = ["serde"] }
 evolve_engine = { version = "0.1.0", path = "../evolve_engine" }
+evolve_gpu = { version = "0.1.0", path = "../evolve_gpu", features = ["egui"] }
 evolve_player = { version = "0.1.0", path = "../evolve_player" }
+memory-stats = "1"
 rfd = "0.17.2"
 # The layout file: unlike JSON, RON can store the infinite rectangles egui_dock keeps in its layout.
 ron = "0.12.2"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+egui_kittest = "0.36"

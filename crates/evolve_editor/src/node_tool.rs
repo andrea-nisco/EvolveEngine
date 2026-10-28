@@ -28,11 +28,9 @@ impl EditorApp {
         matches!(self.scene.find(id)?.kind, NodeKind::Shape(_)).then_some(id)
     }
 
+    /// The shape for changing; stamps it as changed, so only call it when about to edit.
     fn shape_mut(&mut self, id: NodeId) -> Option<&mut Shape> {
-        match &mut self.scene.find_mut(id)?.kind {
-            NodeKind::Shape(shape) => Some(shape),
-            NodeKind::Group(_) | NodeKind::Instance(_) | NodeKind::Camera(_) => None,
-        }
+        self.scene.shape_mut(id)
     }
 
     fn anchor_at(&self, target: AnchorRef) -> Option<&Anchor> {

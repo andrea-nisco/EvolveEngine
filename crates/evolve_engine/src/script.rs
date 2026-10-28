@@ -11,13 +11,22 @@
 //! fn on_trigger(me, other, entered) { }   // a body entered (true) or left (false) a trigger
 //! ```
 //!
+//! Input: `key_down("A")`, `key_pressed("Space")`, `mouse_x()`, `mouse_y()` (the pointer in the world), `mouse_down()`, and for the right
+//! button `mouse_right_down()`, `mouse_right_pressed()`, `mouse_right_released()`, and `mouse_wheel()` (how far the wheel moved in this
+//! frame, positive up). The camera: `main_camera()` (the id of the node whose frame the player sees, or -1), `camera_width()`,
+//! `camera_height()` and `set_camera_height(h)` (the frame's height in world units; its width follows, the aspect ratio stays) or
+//! `set_camera_size(w, h)`. Move the camera with `set_pos` / `move_by` on its node.
+//!
+//! Appearance: `set_opacity`, `set_visible`, `set_fill(me, r, g, b)`, `set_stroke(me, r, g, b)` and `set_stroke_width(me, width)` (0 to
+//! 10,000; a small change of width costs the renderer no new triangles, so a game can restyle thousands of borders in a frame).
+//!
 //! Scenes: `load_scene("Level 2")`, `next_scene()`, `restart_scene()` and `scene_name()`.
 //! `set_global("score", 10)` and `get_global("score")` keep values across scenes.
 
 use crate::animation::{compose, decompose};
 use crate::geometry::Vec2;
 use crate::runtime::World;
-use crate::scene::{NodeId, NodeKind};
+use crate::scene::{NodeId, NodeKind, Shape};
 use crate::style::{Color, Paint};
 use rhai::{Dynamic, Engine, Map};
 use std::cell::RefCell;
@@ -45,6 +54,9 @@ pub fn check_script(source: &str) -> Result<(), String> {
 }
 
 /// Any number a script passes (int or float) as a float.
+/// The widest stroke a script can ask for.
+const MAX_STROKE_WIDTH: f32 = 10_000.0;
+
 fn num(value: &Dynamic) -> f32 {
     value.as_float().ok().or_else(|| value.as_int().ok().map(|i| i as f64)).unwrap_or(0.0) as f32
 }
@@ -55,6 +67,25 @@ fn node(id: i64) -> NodeId {
 
 fn channel(value: &Dynamic) -> u8 {
     num(value).round().clamp(0.0, 255.0) as u8
+}
+
+/// The smallest and the largest side a script can give the camera's frame (world units): a frame that is not a number, zero or enormous
+/// would give a picture that is nothing at all, or the whole renderer's arithmetic.
+const MIN_CAMERA_SIDE: f32 = 0.001;
+const MAX_CAMERA_SIDE: f32 = 1.0e7;
+
+/// The size of the main camera's frame (the default one without a camera).
+fn camera_size(scene: &crate::scene::Scene) -> Vec2 {
+    scene.camera_view().size
+}
+
+/// Gives the main camera's frame a size (clamped); nothing if the scene has no camera.
+fn set_camera_size(scene: &mut crate::scene::Scene, size: Vec2) {
+    let Some(id) = scene.main_camera().filter(|_| size.x.is_finite() && size.y.is_finite()) else { return };
+    let size = Vec2::new(size.x.clamp(MIN_CAMERA_SIDE, MAX_CAMERA_SIDE), size.y.clamp(MIN_CAMERA_SIDE, MAX_CAMERA_SIDE));
+    if let Some(mut node) = scene.find_mut(id) {
+        node.set_camera_size(size);
+    }
 }
 
 /// Registers every function scripts can call. `world` is shared with the runtime.
@@ -101,44 +132,57 @@ pub(crate) fn register_api(engine: &mut Engine, world: &Rc<RefCell<World>>) {
     });
     api!("rotation", |w, id: i64| w.scene.find(node(id)).map_or(0.0, |n| decompose(&n.transform).1.to_degrees() as f64));
     api!("set_rotation", |w, id: i64, degrees: Dynamic| {
-        if let Some(n) = w.scene.find_mut(node(id)) {
+        if let Some(mut n) = w.scene.find_mut(node(id)) {
             let (position, _, scale) = decompose(&n.transform);
-            n.transform = compose(position, num(&degrees).to_radians(), scale);
+            n.set_transform(compose(position, num(&degrees).to_radians(), scale));
         }
     });
     api!("scale_x", |w, id: i64| w.scene.find(node(id)).map_or(1.0, |n| decompose(&n.transform).2.x as f64));
     api!("scale_y", |w, id: i64| w.scene.find(node(id)).map_or(1.0, |n| decompose(&n.transform).2.y as f64));
     api!("set_scale", |w, id: i64, sx: Dynamic, sy: Dynamic| {
-        if let Some(n) = w.scene.find_mut(node(id)) {
+        if let Some(mut n) = w.scene.find_mut(node(id)) {
             let (position, rotation, _) = decompose(&n.transform);
-            n.transform = compose(position, rotation, Vec2::new(num(&sx), num(&sy)));
+            n.set_transform(compose(position, rotation, Vec2::new(num(&sx), num(&sy))));
         }
     });
 
     // --- Appearance ------------------------------------------------------------------------
     api!("opacity", |w, id: i64| w.scene.find(node(id)).map_or(0.0, |n| n.opacity as f64));
     api!("set_opacity", |w, id: i64, value: Dynamic| {
-        if let Some(n) = w.scene.find_mut(node(id)) {
-            n.opacity = num(&value).clamp(0.0, 1.0);
+        if let Some(mut n) = w.scene.find_mut(node(id)) {
+            n.set_opacity(num(&value).clamp(0.0, 1.0));
         }
     });
     api!("set_visible", |w, id: i64, visible: bool| {
-        if let Some(n) = w.scene.find_mut(node(id)) {
-            n.visible = visible;
+        if let Some(mut n) = w.scene.find_mut(node(id)) {
+            n.set_visible(visible);
         }
     });
     api!("set_fill", |w, id: i64, r: Dynamic, g: Dynamic, b: Dynamic| {
-        if let Some(n) = w.scene.find_mut(node(id)) {
-            if let NodeKind::Shape(shape) = &mut n.kind {
-                shape.fill = Some(Paint::Solid(Color::rgb(channel(&r), channel(&g), channel(&b))));
+        let color = Color::rgb(channel(&r), channel(&g), channel(&b));
+        if let Some(mut n) = w.scene.find_mut(node(id)) {
+            // A color change on a solid fill (the usual case, maybe every frame) only touches the shape's paint.
+            if !n.set_solid_fill_color(color) {
+                if let NodeKind::Shape(shape) = &mut n.kind {
+                    shape.fill = Some(Paint::Solid(color));
+                }
             }
         }
     });
     api!("set_stroke", |w, id: i64, r: Dynamic, g: Dynamic, b: Dynamic| {
-        if let Some(NodeKind::Shape(shape)) = w.scene.find_mut(node(id)).map(|n| &mut n.kind) {
-            if let Some(stroke) = shape.stroke.as_mut() {
-                stroke.paint = Paint::Solid(Color::rgb(channel(&r), channel(&g), channel(&b)));
+        let color = Color::rgb(channel(&r), channel(&g), channel(&b));
+        if let Some(mut n) = w.scene.find_mut(node(id)) {
+            if !n.set_solid_stroke_color(color) {
+                if let NodeKind::Shape(Shape { stroke: Some(stroke), .. }) = &mut n.kind {
+                    stroke.paint = Paint::Solid(color);
+                }
             }
+        }
+    });
+
+    api!("set_stroke_width", |w, id: i64, width: Dynamic| {
+        if let Some(mut n) = w.scene.find_mut(node(id)) {
+            n.set_stroke_width(num(&width).clamp(0.0, MAX_STROKE_WIDTH));
         }
     });
 
@@ -177,6 +221,24 @@ pub(crate) fn register_api(engine: &mut Engine, world: &Rc<RefCell<World>>) {
     api!("mouse_x", |w| w.input.mouse.x as f64);
     api!("mouse_y", |w| w.input.mouse.y as f64);
     api!("mouse_down", |w| w.input.mouse_down);
+    api!("mouse_right_down", |w| w.input.mouse_right_down);
+    api!("mouse_right_pressed", |w| w.input.mouse_right_pressed);
+    api!("mouse_right_released", |w| w.input.mouse_right_released);
+    api!("mouse_wheel", |w| w.input.wheel as f64);
+
+    // --- The camera ----------------------------------------------------------------------------
+    // The frame the player sees is the main camera's `size`. Zooming is changing it; its position is the camera node's.
+    api!("main_camera", |w| w.scene.main_camera().map_or(-1, |id| id.0 as i64));
+    api!("camera_width", |w| camera_size(&w.scene).x as f64);
+    api!("camera_height", |w| camera_size(&w.scene).y as f64);
+    api!("set_camera_height", |w, height: Dynamic| {
+        let size = camera_size(&w.scene);
+        let height = num(&height);
+        set_camera_size(&mut w.scene, Vec2::new(height * size.x / size.y.max(MIN_CAMERA_SIDE), height));
+    });
+    api!("set_camera_size", |w, width: Dynamic, height: Dynamic| {
+        set_camera_size(&mut w.scene, Vec2::new(num(&width), num(&height)));
+    });
 
     // --- Animation -------------------------------------------------------------------------
     api!("play", |w, clip: String, looping: bool| {
@@ -225,5 +287,145 @@ mod tests {
         assert!(check_script(SCRIPT_TEMPLATE).is_ok());
         let error = check_script("fn on_update(me, dt) { let x = ; }").unwrap_err();
         assert!(error.contains("line"), "{error}");
+    }
+
+    // --- The right button, the wheel and the camera ---------------------------------------------------
+
+    use crate::runtime::{Input, Runtime};
+    use crate::scene::Scene;
+
+    /// A scene whose camera node (800 x 400 frame) has `script`, and a runtime for it.
+    fn with_camera_script(script: &str) -> Runtime {
+        let mut scene = Scene::with_camera(Vec2::new(800.0, 400.0));
+        let camera = scene.main_camera().expect("a camera");
+        scene.find_mut(camera).unwrap().script = Some(script.to_string());
+        Runtime::new(&scene)
+    }
+
+    fn lines(runtime: &Runtime) -> Vec<String> {
+        runtime.log().iter().map(|l| l.text.clone()).collect()
+    }
+
+    #[test]
+    fn a_script_sets_the_width_of_a_stroke_within_bounds_and_leaves_what_is_not_a_number_alone() {
+        use crate::revision::Changes;
+        use crate::style::{Color, Stroke};
+        let mut scene = Scene::with_camera(Vec2::new(800.0, 400.0));
+        let mut shape = Shape::new(crate::path::Path::rect(Vec2::ZERO, Vec2::splat(10.0)));
+        shape.stroke = Some(Stroke::solid(Color::BLACK, 2.0));
+        let border = scene.new_node("border", NodeKind::Shape(shape));
+        let border = scene.add(border, None);
+        let mut plain = Shape::new(crate::path::Path::rect(Vec2::ZERO, Vec2::splat(10.0)));
+        plain.stroke = None;
+        let plain = scene.new_node("plain", NodeKind::Shape(plain));
+        let plain = scene.add(plain, None);
+        let camera = scene.main_camera().expect("a camera");
+        let stroke_of = |runtime: &Runtime, id: NodeId| match &runtime.scene().find(id).unwrap().kind {
+            NodeKind::Shape(shape) => shape.stroke.as_ref().map(|stroke| stroke.width),
+            _ => unreachable!(),
+        };
+        // (what the script asks for, the width the border has after one frame, from 2)
+        for (call, width, kinds) in [
+            ("3.5", 3.5, Changes::PAINT),
+            ("3", 3.0, Changes::PAINT),
+            ("0.25", 0.25, Changes::PAINT),
+            ("2.0", 2.0, Changes::NONE),
+            ("-4.0", 0.0, Changes::PAINT | Changes::GEOMETRY),
+            ("0", 0.0, Changes::PAINT | Changes::GEOMETRY),
+            ("1.0e30", 10_000.0, Changes::PAINT),
+            ("0.0 / 0.0", 2.0, Changes::NONE),
+        ] {
+            let mut game = scene.clone();
+            // The same call on a shape with no stroke, and on a node that is not there: nothing happens to them.
+            game.find_mut(camera).unwrap().script = Some(format!("fn on_update(me, dt) {{ set_stroke_width({}, {call}); set_stroke_width({}, 5.0); set_stroke_width(987654, 5.0); }}", border.0, plain.0));
+            let mut runtime = Runtime::new(&game);
+            let before = runtime.scene().revision();
+            runtime.update(1.0 / 60.0, Input::default());
+            assert_eq!(stroke_of(&runtime, border), Some(width), "set_stroke_width({call})");
+            assert_eq!(stroke_of(&runtime, plain), None, "a shape with no stroke gets none");
+            assert_eq!(runtime.scene().changed_since(&before), kinds, "set_stroke_width({call})");
+        }
+    }
+
+    #[test]
+    fn scripts_see_the_right_button_and_the_wheel() {
+        let mut runtime = with_camera_script(
+            "fn on_update(me, dt) {
+                 if mouse_right_pressed() { print(\"pressed\"); }
+                 if mouse_right_down() { print(\"down\"); }
+                 if mouse_right_released() { print(\"released\"); }
+                 if mouse_wheel() != 0.0 { print(\"wheel \" + mouse_wheel()); }
+                 if mouse_down() { print(\"left\"); }
+             }",
+        );
+        runtime.update(0.016, Input::default());
+        assert!(lines(&runtime).is_empty(), "nothing is pressed: {:?}", lines(&runtime));
+        runtime.update(0.016, Input { mouse_right_down: true, mouse_right_pressed: true, wheel: -1.0, ..Default::default() });
+        runtime.update(0.016, Input { mouse_right_down: true, ..Default::default() });
+        runtime.update(0.016, Input { mouse_right_released: true, wheel: 2.0, ..Default::default() });
+        runtime.update(0.016, Input { mouse_down: true, ..Default::default() });
+        assert_eq!(lines(&runtime), ["pressed", "down", "wheel -1.0", "down", "released", "wheel 2.0", "left"]);
+    }
+
+    #[test]
+    fn scripts_find_the_camera_and_change_the_size_of_its_frame_keeping_its_shape() {
+        let mut runtime = with_camera_script(
+            "fn on_update(me, dt) {
+                 print(\"camera \" + (main_camera() == me) + \" \" + camera_width() + \" \" + camera_height());
+                 set_camera_height(200.0);
+             }",
+        );
+        runtime.update(0.016, Input::default());
+        runtime.update(0.016, Input::default());
+        assert_eq!(lines(&runtime), ["camera true 800.0 400.0", "camera true 400.0 200.0"]);
+        assert_eq!(runtime.scene().camera_view().size, Vec2::new(400.0, 200.0), "the frame is half as high and half as wide");
+        // A frame of any shape can be given too.
+        let mut runtime = with_camera_script("fn on_update(me, dt) { set_camera_size(300, 100); }");
+        runtime.update(0.016, Input::default());
+        assert_eq!(runtime.scene().camera_view().size, Vec2::new(300.0, 100.0));
+    }
+
+    #[test]
+    fn a_size_that_is_not_a_number_or_is_absurd_cannot_ruin_the_camera() {
+        let mut runtime = with_camera_script(
+            "fn on_update(me, dt) {
+                 let nothing = 0.0 / 0.0;
+                 set_camera_height(nothing);
+                 set_camera_size(nothing, 100.0);
+                 set_camera_size(100.0, 1.0 / 0.0);
+             }",
+        );
+        runtime.update(0.016, Input::default());
+        assert_eq!(runtime.scene().camera_view().size, Vec2::new(800.0, 400.0), "NaN and infinity change nothing");
+        for (script, side) in [("set_camera_height(0.0)", 0.001), ("set_camera_height(-5.0)", 0.001), ("set_camera_height(1.0e30)", 1.0e7)] {
+            let mut runtime = with_camera_script(&format!("fn on_update(me, dt) {{ {script}; }}"));
+            runtime.update(0.016, Input::default());
+            let size = runtime.scene().camera_view().size;
+            assert!(size.is_finite() && size.y == side && size.x > 0.0, "{script}: {size:?}");
+        }
+    }
+
+    #[test]
+    fn setting_the_size_the_camera_has_leaves_the_scene_as_it_was_for_everyone_who_watches_it() {
+        let mut runtime = with_camera_script("fn on_update(me, dt) { set_camera_height(400.0); set_camera_size(800.0, 400.0); }");
+        let before = runtime.scene().revision();
+        runtime.update(0.016, Input::default());
+        assert_eq!(runtime.scene().revision(), before, "a game that sets its zoom in every frame does not make a renderer redo its work");
+        let mut runtime = with_camera_script("fn on_update(me, dt) { set_camera_height(300.0); }");
+        let before = runtime.scene().revision();
+        runtime.update(0.016, Input::default());
+        assert_eq!(runtime.scene().changed_since(&before), crate::revision::Changes::GEOMETRY, "a new size is a change to the camera and nothing else");
+    }
+
+    #[test]
+    fn a_scene_without_a_camera_gives_no_camera_to_find_and_none_to_change() {
+        let mut scene = Scene::default();
+        let node = scene.new_node("script", NodeKind::Group(Vec::new()));
+        let id = scene.add(node, None);
+        scene.find_mut(id).unwrap().script = Some("fn on_update(me, dt) { print(\"main \" + main_camera()); set_camera_height(10.0); }".to_string());
+        let mut runtime = Runtime::new(&scene);
+        runtime.update(0.016, Input::default());
+        assert_eq!(lines(&runtime), ["main -1"]);
+        assert!(runtime.log().iter().all(|l| !l.error));
     }
 }

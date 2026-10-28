@@ -1,6 +1,7 @@
 //! Copying objects between places and documents, and spawning copies while a game runs.
 
 use crate::geometry::{Affine2, Vec2};
+use crate::revision::Changes;
 use crate::scene::{Node, NodeId, NodeKind, Scene};
 use crate::symbol::{Symbol, SymbolId};
 use serde::{Deserialize, Serialize};
@@ -54,10 +55,15 @@ fn fix_pasted(node: &mut Node, symbols: &HashMap<SymbolId, SymbolId>) {
         NodeKind::Instance(instance) => {
             if let Some(&new) = symbols.get(&instance.symbol) {
                 instance.symbol = new;
+                node.revs.bump(Changes::STRUCTURE);
             }
         }
         NodeKind::Group(children) => children.iter_mut().for_each(|c| fix_pasted(c, symbols)),
-        NodeKind::Shape(shape) => shape.skin = None,
+        NodeKind::Shape(shape) => {
+            if shape.skin.take().is_some() {
+                node.revs.bump(Changes::GEOMETRY);
+            }
+        }
         NodeKind::Camera(_) => {}
     }
 }
@@ -69,6 +75,7 @@ impl Scene {
         for id in self.top_level_selection(ids) {
             let mut node = self.find(id)?.clone();
             node.transform = self.world_transform(id)?;
+            node.revs.bump(Changes::TRANSFORM);
             nodes.push(node);
         }
         if nodes.is_empty() {
@@ -104,12 +111,18 @@ impl Scene {
             mapping.insert(symbol.id, id);
             let root = self.clone_with_new_ids(symbol.root.clone());
             self.symbols.push(Symbol { id, name: symbol.name.clone(), root });
+            self.touch(Changes::STRUCTURE);
         }
         // Symbols pasted with new ids may contain instances of other pasted symbols.
+        let mut touched = false;
         for symbol in &mut self.symbols {
             if mapping.values().any(|&new| new == symbol.id) {
                 fix_symbol_references(&mut symbol.root, &mapping);
+                touched = true;
             }
+        }
+        if touched {
+            self.touch(Changes::STRUCTURE);
         }
 
         let mut pasted = Vec::new();
@@ -117,6 +130,7 @@ impl Scene {
             let mut copy = self.clone_with_new_ids(node.clone());
             fix_pasted(&mut copy, &mapping);
             copy.transform = Affine2::from_translation(offset) * copy.transform;
+            copy.revs.bump(Changes::TRANSFORM);
             pasted.push(self.add(copy, None));
         }
         pasted
@@ -135,8 +149,8 @@ impl Scene {
         };
         let origin = self.world_transform(id)?.translation;
         self.translate_world(id, at - origin);
-        if let Some(node) = self.find_mut(id) {
-            node.visible = true;
+        if let Some(mut node) = self.find_mut(id) {
+            node.set_visible(true);
         }
         Some(id)
     }
@@ -147,6 +161,7 @@ fn fix_symbol_references(node: &mut Node, mapping: &HashMap<SymbolId, SymbolId>)
         NodeKind::Instance(instance) => {
             if let Some(&new) = mapping.get(&instance.symbol) {
                 instance.symbol = new;
+                node.revs.bump(Changes::STRUCTURE);
             }
         }
         NodeKind::Group(children) => children.iter_mut().for_each(|c| fix_symbol_references(c, mapping)),
@@ -226,7 +241,7 @@ mod tests {
         let mut scene = Scene::default();
         let template = square(&mut scene, Vec2::new(500.0, 500.0));
         {
-            let node = scene.find_mut(template).unwrap();
+            let mut node = scene.find_mut(template).unwrap();
             node.name = "Bullet".into();
             node.visible = false;
             node.script = Some("fn on_update(me, dt) {}".into());

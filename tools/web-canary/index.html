@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EvolveEngine web canary</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; background: #1b1d22; color: #e6e6e6; }
+  canvas { display: block; background: #000; max-width: 100%; border: 1px solid #444; }
+  pre { background: #111; padding: 12px; overflow: auto; font-size: 13px; line-height: 1.35; }
+  code { background: #2a2d34; padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>EvolveEngine web canary</h1>
+<p>Runs the GPU renderer in this browser and reports what it saw (plan task 2.12). Options in the address:
+<code>?backend=webgl|webgpu</code> <code>&amp;scene=scene.evolve</code> <code>&amp;frames=120</code>
+<code>&amp;size=1280x720</code>. The run is bounded: three views, a fixed number of frames each, then it stops.</p>
+<canvas id="canvas" width="1280" height="720"></canvas>
+<pre id="out"></pre>
+<script type="module">
+  import init, { start } from "./web_canary.js";
+  const params = new URLSearchParams(location.search);
+  const backend = params.get("backend") || "webgl";
+  const scene = params.get("scene") || "scene.evolve";
+  const frames = parseInt(params.get("frames") || "120", 10);
+  const [w, h] = (params.get("size") || "1280x720").split("x").map((n) => parseInt(n, 10));
+  const canvas = document.getElementById("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const out = document.getElementById("out");
+  // For automatic runs (?post=1): send the finished report back to the server that served this page.
+  // The picture is read at once (the canvas keeps it only until the browser shows the next frame).
+  if (params.get("post")) window.canaryDone = async (text) => {
+    const picture = canvas.toDataURL("image/png");
+    await fetch("/picture", { method: "POST", body: picture });
+    await fetch("/report", { method: "POST", body: text });
+  };
+  out.textContent = `user agent: ${navigator.userAgent}\ndevice pixel ratio: ${devicePixelRatio}\n`;
+  if (backend === "webgpu" && !("gpu" in navigator)) {
+    out.textContent += "ERROR: this browser has no WebGPU (navigator.gpu is missing). Try ?backend=webgl.\n";
+  } else {
+    try {
+      await init();
+      await start("canvas", scene, backend, frames);
+    } catch (e) {
+      out.textContent += "ERROR: " + e + "\n";
+    }
+  }
+</script>
+</body>
+</html>

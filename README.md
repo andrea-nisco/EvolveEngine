@@ -3,25 +3,51 @@
 A vector-first 2D game editor written in Rust. Everything on screen is drawn straight from Bézier data at the
 display's resolution, so artwork stays razor sharp at any zoom level.
 
-It follows [vector_game_engine_development_roadmap.md](vector_game_engine_development_roadmap.md).
-All six roadmap phases are implemented. See [Status](#status) for the details and the limits, and
-[TODO.md](TODO.md) for everything that was left out or simplified, phase by phase.
+EvolveEngine is free and open source ([MIT](LICENSE)). The idea behind it: an editor should not be fixed. It is meant
+to be a solid base that you change, together with your game, to fit what your game needs (see
+[Where this is going](#where-this-is-going)).
 
-## Run
+The original six roadmap phases are implemented, and a GPU renderer (wgpu) is being added next to the CPU one, to keep big
+scenes fast: it is already in the editor as an option (see [The GPU renderer](#the-gpu-renderer)). See [Status](#status)
+for the details and the limits, and [TODO.md](TODO.md) for the plan and for everything that was left out or simplified.
 
-Requires the Rust toolchain (and the MSVC C++ Build Tools on Windows).
+## Download
+
+Ready-made builds for Windows, macOS (Apple Silicon) and Linux (x86-64) are attached to each release on the
+repository's Releases page. Unpack the archive anywhere and start `evolve_editor`. It contains the editor, the player
+(needed by *Export Game*) and the web player (needed by *Export for Web*), all in one folder: keep them together.
+
+The programs are not code-signed yet, so the system warns on first start:
+- **Windows:** SmartScreen says "Windows protected your PC": choose *More info* → *Run anyway*.
+- **macOS:** "cannot be opened because the developer cannot be verified". Either right-click the program → *Open*, or
+  remove the download mark once: `xattr -dr com.apple.quarantine <the unpacked folder>`.
+- **Linux:** nothing to do; if your file manager dropped the executable bit, `chmod +x evolve_editor evolve_player`.
+
+## Build from source
+
+Runs on Windows, macOS and Linux. Requires the [Rust toolchain](https://rustup.rs), plus:
+- Windows: the MSVC C++ Build Tools.
+- macOS: the Xcode command line tools (`xcode-select --install`).
+- Linux: a C compiler and the usual window-system development packages
+  (on Debian / Ubuntu: `sudo apt install build-essential pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev`).
 
 ```
 cargo build --release --workspace     # the editor and the standalone player
 cargo run -p evolve_editor --release
 cargo test --workspace
+cargo clippy --workspace --all-targets   # kept free of warnings
 ```
+
+The GPU tests open a graphics device without a window. On a machine with no graphics adapter they print "skipped" and pass
+(set `EVOLVE_REQUIRE_GPU=native` to make a missing adapter a failure, as the CI job on Linux does). Anything that uses the card
+follows [GPU_SAFETY.md](GPU_SAFETY.md).
 
 For *Export for Web*, build the browser player once (needs `rustup target add wasm32-unknown-unknown` and
 `cargo install wasm-bindgen-cli --version 0.2.129 --locked`):
 
 ```
-powershell -ExecutionPolicy Bypass -File tools/build-web-player.ps1
+powershell -ExecutionPolicy Bypass -File tools/build-web-player.ps1   # Windows
+tools/build-web-player.sh                                              # macOS, Linux
 ```
 
 ## Using the editor
@@ -40,10 +66,18 @@ use the Inspector for its position, rotation, size (*W* and *H*, in world units:
 background color. Put a camera inside a group, or move it from a script (`set_pos`), to make it follow something.
 The first camera in the Objects list is the one used; a scene without any camera shows a default 1280 x 720 frame.
 
+**Renderer and frame times:** the Scene and Game views are drawn by the CPU renderer by default. *View → Renderer* (or the
+*Renderer* box in the status bar, or `--renderer auto|cpu|gpu` on the command line) switches to the GPU renderer, see
+[The GPU renderer](#the-gpu-renderer). The status bar shows how fast the editor is running: frames per second while frames
+follow each other, the average and the worst time of the last 120 frames, and where the time went (hover for the details;
+*View → Show frame times* turns it off). *View → Frame rate* caps the rate while a game runs or a clip plays, to see how a game
+feels at a lower rate or to spare the card; an idle editor draws nothing.
+
 **Creating objects:** the *+ Add* menu at the top of the Objects panel (also on right-click in its empty space) adds
 an empty group, a rectangle, an ellipse or a camera in the middle of your view, and imports SVGs. Everything you
 create, draw or import appears in the Objects list with an icon for its kind (camera, rectangle, ellipse, path,
-group, symbol instance, bone). Right-click a row for Rename, Duplicate and Delete.
+group, symbol instance, bone). Right-click a row for Rename, Duplicate and Delete. The pin at the end of a row selects that object and takes the Scene view to
+it, which is the way to find one object among thousands.
 
 **Scenes:** a project holds any number of scenes, edited one at a time. The drop-down at the top of the Objects panel
 and the **Scenes** tab switch between them; in the Scenes tab, *+ New scene* adds one, click opens, double-click
@@ -61,10 +95,11 @@ scenes starts a fresh history). Scripts move between scenes: `next_scene()` goes
 | Rect / Ellipse (`R` / `E`) | Drag to draw. `Shift` = square/circle, `Alt` = from center. |
 | Pencil (`N`) | Draw freehand; the stroke is simplified into smooth curves. |
 
-**View:** mouse wheel zooms at the cursor · middle-drag or `Space`+drag pans · right-drag rotates the view ·
+**View:** mouse wheel zooms at the cursor · middle-drag or `Space`+drag pans · right-drag rotates the view · on a
+trackpad (a Mac, or a precision touchpad) two-finger scroll pans, pinch or `Cmd`/`Ctrl`+scroll zooms ·
 `Home` fits the camera frame · `F` zooms to the selection.
 
-**Edit:** `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo · `Ctrl+X` / `Ctrl+C` / `Ctrl+V` cut, copy, paste (`Ctrl+Shift+V`
+**Edit** (on macOS read `Ctrl` as `Cmd`)**:** `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo · `Ctrl+X` / `Ctrl+C` / `Ctrl+V` cut, copy, paste (`Ctrl+Shift+V`
 pastes in place; copies also go to the system clipboard, so you can paste into another editor window, and pasting
 SVG text imports the drawing) · `Ctrl+D` duplicate · `Ctrl+G` / `Ctrl+Shift+G` group/ungroup ·
 `Ctrl+J` combine into a compound path · `[` / `]` send backward / bring forward · `Del` delete.
@@ -141,10 +176,14 @@ fn on_trigger(me, other, entered) { }   // entered a trigger (true) or left it (
 Functions you can call: `find("name")`, `exists(id)`, `destroy(id)`, `instantiate("name", x, y)` (see below) ·
 `pos_x/pos_y(id)`, `set_pos(id, x, y)`,
 `move_by(id, dx, dy)`, `rotation/set_rotation(id, degrees)`, `scale_x/scale_y/set_scale` ·
-`opacity/set_opacity`, `set_visible`, `set_fill(id, r, g, b)`, `set_stroke` · `velocity_x/velocity_y(id)`,
+`opacity/set_opacity`, `set_visible`, `set_fill(id, r, g, b)`, `set_stroke(id, r, g, b)`, `set_stroke_width(id, w)` ·
+`velocity_x/velocity_y(id)`,
 `set_velocity`, `add_impulse`, `set_gravity(gx, gy)`, `overlaps(a, b)`,
 `raycast(ox, oy, dx, dy, max)` (returns `#{hit, id, x, y, nx, ny, distance}`) ·
-`key_down("Left")`, `key_pressed("Space")`, `mouse_x()`, `mouse_y()`, `mouse_down()` ·
+`key_down("Left")`, `key_pressed("Space")`, `mouse_x()`, `mouse_y()`, `mouse_down()`, `mouse_right_down()`,
+`mouse_right_pressed()`, `mouse_right_released()`, `mouse_wheel()` (how far the wheel moved this frame, positive up) ·
+`main_camera()`, `camera_width()`, `camera_height()`, `set_camera_height(h)`, `set_camera_size(w, h)` (a game can zoom its own
+camera; the editor's Game view gives the game the wheel and the right button) ·
 `play("clip")`, `play("clip", true)` (loop), `stop_animation()` · `get_var(id, "name")`, `set_var(id, "name", v)`
 (per-object storage that survives between handlers) · `next_scene()`, `load_scene("name")`, `restart_scene()`,
 `scene_name()`, `get_global("name")`, `set_global("name", v)` · `time()`, `random()`, `print(...)`.
@@ -164,19 +203,24 @@ run until the object is shown. The copies are visible and active at once, and th
 frame. (The function is called `instantiate` because `spawn` is a reserved word in Rhai.)
 
 **Exporting a game (File menu):**
-- *Export Game (desktop)...* writes one standalone `.exe`: the player program with your project built into it.
-  Send it to anyone; it needs no editor and no project file. `F11` toggles fullscreen. The game is scaled to fit
-  the window.
+- *Export Game (desktop)...* writes one standalone program (`.exe` on Windows): the player program with your project
+  built into it. Send it to anyone; it needs no editor and no project file. `F11` toggles fullscreen. The game is
+  scaled to fit the window. On macOS the result is an application bundle (`game.app`, a folder that Finder shows as one
+  app). It is signed ad hoc, so it opens normally on your Mac; people who download it get the same "developer cannot
+  be verified" warning as for the editor (right-click → *Open*, or `xattr -dr com.apple.quarantine game.app`).
 - *Export for Web (HTML)...* writes a folder with `index.html`, `evolve_player.js` and `evolve_player_bg.wasm`.
   Serve it over http to play (browsers don't allow WebAssembly modules from `file://`), for example with
   `python -m http.server` in that folder, or upload it to any static web host.
 - Both need the player to be built once (see below). The editor finds it next to its own executable
-  (`evolve_player.exe`) and in `dist/web-player`.
+  (`evolve_player.exe` on Windows, `evolve_player` elsewhere) and in `dist/web-player`.
 - The browser player is about 6.5 MB (about 1.7 MB when your web host compresses it, which most do). It is built
   with a size-optimized profile and without egui's bundled fonts, since a game only draws vectors.
-- From a script: `evolve_editor --export-desktop game.evolve out.exe`, `evolve_editor --export-web game.evolve out-folder`,
+- From a script: `evolve_editor --export-desktop game.evolve out`, `evolve_editor --export-web game.evolve out-folder`,
   `evolve_editor --export-png game.evolve out.png [scale]`, `evolve_editor --export-svg game.evolve out.svg` (these two
-  use the project's start scene) and `evolve_editor --sample demo.evolve` (writes the demo project).
+  use the project's start scene) and `evolve_editor --sample demo.evolve` (writes the demo project). Also:
+  `--renderer auto|cpu|gpu` and `--quality auto|high|balanced|low` (see below), `--gen-scene large|illustration|sprites out.evolve`
+  (writes a big benchmark scene that needs no game files) and `--benchmark project.evolve report` (measures rendering and
+  editing cost, see [BENCHMARKS.md](BENCHMARKS.md)).
   `evolve_player game.evolve` plays a project file directly. An exported game contains all scenes and starts at the
   start scene.
 
@@ -192,7 +236,14 @@ from older versions (one scene, or a screen size and color instead of a camera) 
 that frames the old screen. *File → Import SVG* brings
 in paths, groups, strokes and gradients. A title ending in `*` means unsaved changes: New, Open and closing the
 window ask whether to save first. While you have unsaved changes the editor also writes a recovery copy every 30
-seconds (in `%LOCALAPPDATA%\EvolveEngine`); if the editor ever closes unexpectedly, the next start offers to recover it.
+seconds (in `%LOCALAPPDATA%\EvolveEngine` on Windows, `~/Library/Application Support/EvolveEngine` on macOS,
+`~/.local/share/EvolveEngine` on Linux); if the editor ever closes unexpectedly, the next start offers to recover it.
+
+**Project file versions:** your projects will keep opening. The format has a version number, and every new editor opens
+files of all older versions and upgrades them when it loads them (an editor never silently loses an old project).
+The reverse is not true: a file saved by a newer editor is refused by an older one, with a message.
+Version 1: one scene, screen size and color on the scene · 2: a camera object replaces the screen · 3 (current):
+several scenes per project.
 
 The Objects panel shows the scene tree (drag rows to re-order or re-parent, eye/lock toggles, double-click to
 rename) and the Inspector shows the properties of the selection: position and size, opacity, fill and stroke (solid,
@@ -219,8 +270,16 @@ crates/
     rig.rs          bones, IK solver, skinning and weight painting
     symbol.rs       symbols (prefabs) and instances
     boolean.rs      union / subtract / intersect / exclude
-    render.rs       tiny-skia rasterizer
+    render.rs       tiny-skia rasterizer (the CPU renderer, the reference)
+    revision.rs     change tracking: what changed in a scene since a renderer, the undo history or an index last looked
     io.rs           .evolve project files, SVG import (usvg)
+  evolve_gpu/      the GPU renderer (wgpu), also built for the browser
+    renderer.rs     draws a scene on the card; reuses the last frame when only the view moved
+    tessellate.rs   tess_cache.rs  draw_list.rs  curves to triangles (made once per zoom level), what is drawn and in which order
+    layers.rs       targets.rs     groups with opacity and clip groups, the offscreen pictures they use
+    profile.rs      quality profiles (High, Balanced, Low) and the governor that picks one
+    egui_glue.rs    shows the pictures inside egui (the editor and the desktop player)
+    device.rs  errors.rs  a device without a window, graphics errors that never crash the editor
   evolve_player/   standalone player (desktop exe and WebAssembly) and the export/bundle code
     bundle.rs       appends a project to the player exe; writes the web folder
     app.rs          the player window; input.rs keyboard/pointer -> engine input
@@ -242,11 +301,40 @@ crates/
     clipboard_ui.rs export_ui.rs   cut/copy/paste and picture export commands
     panels.rs       menu, toolbar, status bar
     history.rs      undo/redo
+    renderers.rs    which renderer draws the views, and the fallback to the CPU one
+    frame_stats.rs  frame_limit.rs   frame times in the status bar, the frame-rate cap
+    cli.rs          bench.rs  bench_scene.rs   command-line actions, --benchmark, --gen-scene
+tools/
+  build-web-player.ps1 / .sh   builds the browser player used by Export for Web
+  web-canary/ build-web-canary.ps1   a browser page that runs the GPU renderer and reports what the browser offers
+  package-release.sh           packs a release download
 ```
 
 Rendering is done by [tiny-skia](https://github.com/linebender/tiny-skia) on the CPU with analytic anti-aliasing,
-at physical-pixel resolution (so HiDPI screens get the full detail). The UI is [egui](https://egui.rs).
-The engine crate has no dependency on the editor, so a game runtime can reuse it as is.
+at physical-pixel resolution (so HiDPI screens get the full detail), and optionally on the graphics card (below). The UI is
+[egui](https://egui.rs). The engine crate has no dependency on the editor, so a game runtime can reuse it as is.
+
+## The GPU renderer
+
+The CPU renderer redraws every visible shape on every repaint, which is too slow for a very large drawing (a map of 21,000
+shapes and 680,000 points takes about 70 ms a frame at 1080p). The GPU renderer ([wgpu](https://wgpu.rs): Vulkan, Metal,
+DirectX 12 and, for the browser, WebGL2 and WebGPU) makes triangles from the curves once for each zoom level, draws only what
+can reach the view, and draws again only what changed. On the large benchmark scene (21,200 shapes) a frame takes about 8 ms
+instead of 110 ms.
+
+- **How to use it:** *View → Renderer → GPU* (or Auto), or `evolve_editor --renderer gpu`. Today the default is still the CPU
+  renderer. *Quality of the GPU renderer* (Automatic, High, Balanced, Low; `--quality`) sets how much memory the renderer may take and
+  how much time it spends on a view: Automatic picks from the graphics card and lowers itself while frames are slow, and
+  Low also draws at a reduced resolution, a little softer.
+- **What it draws:** fills, strokes (joins, caps, thin lines), linear and radial gradients, opacity, clip groups, symbol
+  instances and skinned shapes, with the same picture as the CPU renderer. Dashes, blend modes, masks, filters, patterns,
+  images and text are not in the engine yet (see the plan).
+- **The CPU renderer stays the reference and the fallback.** A view that the GPU renderer cannot draw completely, a machine
+  with no usable graphics device, a lost device or a card error all fall back to the CPU renderer with a small notice in the
+  view; the editor does not crash. The rules the code follows are in [GPU_SAFETY.md](GPU_SAFETY.md).
+- **Where it is going:** [GPU_RENDERER_PLAN.md](GPU_RENDERER_PLAN.md) has the plan phase by phase, with the measurements and
+  the open decisions; [BENCHMARKS.md](BENCHMARKS.md) has the numbers; [MANUAL_TESTS.md](MANUAL_TESTS.md) lists what needs a person
+  at the keyboard; [OPEN_POINTS.md](OPEN_POINTS.md) lists what waits for a person or a machine.
 
 ## Status
 
@@ -266,4 +354,18 @@ The engine crate has no dependency on the editor, so a game runtime can reuse it
 | 5.2 Scripting runtime, node/animation/input/transform API, `on_init` / `on_update` / `on_collision` / `on_input` | Done (Rhai) |
 | 6.1 Play / Pause / Stop in the viewport, debug overlays | Done (colliders, anchors, fps and draw statistics) |
 | 6.2 Export: standalone desktop and web (WebAssembly/HTML5) builds | Done. Desktop = player + project in one exe; web = folder with index.html, JS and WASM (about 6.5 MB, 1.7 MB gzipped) |
+| GPU renderer (extra, [plan](GPU_RENDERER_PLAN.md)) | In the editor as an option, the CPU renderer is still the default. Draws everything the CPU renderer draws except two rare cases (a skinned clip mask, a skinned shape inside a symbol instance), which fall back with a notice. Runs in a browser (the web canary), but the player and the web export still use the CPU renderer. Dashes, blend modes, masks, filters and text are later phases |
+| Change tracking, benchmarks, CI (extra) | The scene knows what changed (undo, renderer and picking use it); `--benchmark` and `--gen-scene`; CI builds and tests on Windows, macOS and Linux, with a GPU job on Linux that is prepared but has not run yet |
 | Editor structure | Dockable Objects / Scene / Game / Inspector panels, a camera object per scene, and several scenes per project with script-driven transitions (added after the roadmap, see [TODO.md](TODO.md) for the limits) |
+
+## Where this is going
+
+The goal is a complete, free editor that people can start from and then *evolve*: add panels, tools, inspector fields
+and commands that their own game needs, and keep those changes together with the game's project. Today the editor is
+a fixed set of features; making it extensible is the next big step. The plan is in [TODO.md](TODO.md), what changed is in
+[CHANGELOG.md](CHANGELOG.md), and the way to help is in [CONTRIBUTING.md](CONTRIBUTING.md) (please read the
+[Code of Conduct](CODE_OF_CONDUCT.md) too).
+
+## License
+
+[MIT](LICENSE) © 2026 Andrea Nisco

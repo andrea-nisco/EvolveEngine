@@ -1,7 +1,10 @@
 //! Menu bar, tool bar and status bar.
 
+use crate::renderers::RendererChoice;
+use evolve_gpu::profile::Quality;
 use crate::app::EditorApp;
 use crate::dialogs::{ImageKind, Pending};
+use crate::frame_limit::FrameLimit;
 use crate::layout::Pane;
 use crate::theme;
 use crate::tools::Tool;
@@ -189,6 +192,7 @@ impl EditorApp {
                     ui.checkbox(&mut self.view.show_grid, "Show grid");
                     ui.checkbox(&mut self.view.snap_to_grid, "Snap to grid");
                     ui.checkbox(&mut self.view.smart_guides, "Smart guides");
+                    ui.checkbox(&mut self.view.show_frame_times, "Show frame times");
                     ui.horizontal(|ui| {
                         ui.label("Grid size");
                         ui.add(egui::DragValue::new(&mut self.view.grid_size).range(1.0..=500.0).speed(0.5));
@@ -203,6 +207,43 @@ impl EditorApp {
                     if item(ui, "Reset rotation", "", true) {
                         self.camera.rotation = 0.0;
                     }
+                    ui.separator();
+                    ui.menu_button("Frame rate", |ui| {
+                        ui.label("While a game runs or a clip plays");
+                        for limit in FrameLimit::ALL {
+                            if ui.radio(self.frame_limit == limit, limit.to_string()).clicked() {
+                                self.frame_limit = limit;
+                                self.status = format!("Frame rate: {limit}");
+                            }
+                        }
+                        ui.weak("A cap on top of the display's own rate: on a 240 Hz display 140 lands on its steps (120 Hz, mostly). Idle, the editor draws nothing.");
+                    });
+                    ui.menu_button("Renderer", |ui| {
+                        for choice in RendererChoice::ALL {
+                            if ui.radio(self.renderers.choice == choice, choice.to_string()).clicked() {
+                                self.renderers.choice = choice;
+                                self.status = format!("{choice} renderer");
+                            }
+                        }
+                        ui.separator();
+                        ui.label("Quality of the GPU renderer");
+                        for quality in Quality::ALL {
+                            if ui.radio(self.renderers.quality() == quality, quality.to_string()).clicked() {
+                                self.renderers.set_quality(quality);
+                                self.status = format!("{quality} quality");
+                            }
+                        }
+                        if let Some(profile) = self.renderers.adapter_profile() {
+                            ui.weak(format!("Automatic starts from {profile}, which suits this card, and draws smaller pictures while frames are slow."));
+                        }
+                        ui.separator();
+                        match (self.renderers.disabled_because(), self.renderers.adapter()) {
+                            (Some(why), _) => ui.weak(why),
+                            (None, Some(adapter)) => ui.weak(format!("Graphics card: {adapter}")),
+                            (None, None) => ui.weak("No usable graphics card: the GPU renderer is not available"),
+                        };
+                        ui.weak("A few things the GPU renderer cannot draw yet (a skinned clip mask, a skinned shape inside a symbol instance); views that have them use the CPU renderer.");
+                    });
                 });
                 ui.menu_button("Window", |ui| {
                     for pane in Pane::ALL {
@@ -241,11 +282,40 @@ impl EditorApp {
         });
     }
 
+    /// The renderer choice, always in reach (it is also in View → Renderer).
+    fn renderer_selector(&mut self, ui: &mut egui::Ui) {
+        let was = self.renderers.choice;
+        let tip = match (self.renderers.disabled_because(), self.renderers.adapter()) {
+            (Some(why), _) => why,
+            (None, Some(adapter)) => format!("Graphics card: {adapter}"),
+            (None, None) => "No usable graphics card: the GPU renderer is not available".to_string(),
+        };
+        egui::ComboBox::from_id_salt("renderer_status")
+            .selected_text(format!("Renderer: {}", self.renderers.choice))
+            .show_ui(ui, |ui| {
+                for choice in RendererChoice::ALL {
+                    ui.selectable_value(&mut self.renderers.choice, choice, choice.to_string());
+                }
+            })
+            .response
+            .on_hover_text(tip);
+        if self.renderers.choice != was {
+            self.status = format!("{} renderer", self.renderers.choice);
+        }
+    }
+
     pub fn status_bar(&mut self, ui: &mut egui::Ui) {
         Panel::bottom("status_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(self.tool.hint()).color(theme::ACCENT));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.renderer_selector(ui);
+                    if self.view.show_frame_times {
+                        let line = self.frame_stats.line();
+                        if !line.is_empty() {
+                            ui.label(egui::RichText::new(line).monospace()).on_hover_text(self.frame_stats.breakdown());
+                        }
+                    }
                     if ui.small_button(format!("{:.0}%", self.camera.zoom * 100.0)).on_hover_text("Reset zoom to 100%").clicked() {
                         self.camera.zoom = 1.0;
                     }

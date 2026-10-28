@@ -27,6 +27,12 @@ pub struct Input {
     /// Pointer position in world space.
     pub mouse: Vec2,
     pub mouse_down: bool,
+    /// The right mouse button is held, went down in this frame, went up in this frame.
+    pub mouse_right_down: bool,
+    pub mouse_right_pressed: bool,
+    pub mouse_right_released: bool,
+    /// How far the mouse wheel moved in this frame (positive: up, away from the player). Zero when the pointer is not over the game.
+    pub wheel: f32,
 }
 
 /// One line of the game's console.
@@ -231,16 +237,13 @@ impl Runtime {
     fn register_new_scripts(&mut self) {
         let found: Vec<(NodeId, String, String)> = {
             let world = self.world.borrow();
-            world
-                .scene
-                .all_ids()
-                .into_iter()
-                .filter(|id| !self.registered.contains(id))
-                .filter_map(|id| {
-                    let node = world.scene.find(id)?;
-                    Some((id, node.name.clone(), node.script.clone()?))
-                })
-                .collect()
+            let mut found = Vec::new();
+            world.scene.for_each_node(|node| {
+                if let (false, Some(script)) = (self.registered.contains(&node.id), &node.script) {
+                    found.push((node.id, node.name.clone(), script.clone()));
+                }
+            });
+            found
         };
         for (id, name, source) in found {
             self.registered.insert(id);
@@ -352,9 +355,11 @@ impl Runtime {
 
     pub fn stats(&self) -> Stats {
         let world = self.world.borrow();
-        let ids = world.scene.all_ids();
-        let shapes = ids.iter().filter(|&&id| matches!(world.scene.find(id).map(|n| &n.kind), Some(NodeKind::Shape(_)))).count();
-        let bodies = ids.iter().filter(|&&id| world.scene.find(id).is_some_and(|n| n.body.is_some())).count();
+        let (mut shapes, mut bodies) = (0, 0);
+        world.scene.for_each_node(|node| {
+            shapes += matches!(node.kind, NodeKind::Shape(_)) as usize;
+            bodies += node.body.is_some() as usize;
+        });
         Stats { shapes, bodies, scripts: self.scripts.len(), frames: self.frames }
     }
 
@@ -362,17 +367,21 @@ impl Runtime {
     pub fn debug_bodies(&self) -> Vec<DebugBody> {
         let world = self.world.borrow();
         let scene = &world.scene;
-        scene
-            .all_ids()
+        let mut with_body = Vec::new();
+        scene.for_each_node(|node| {
+            if let Some(body) = node.body {
+                with_body.push((node.id, body));
+            }
+        });
+        with_body
             .into_iter()
-            .filter_map(|id| {
-                let body = scene.find(id)?.body?;
+            .map(|(id, body)| {
                 let circle = (body.kind == BodyKind::Dynamic).then(|| {
                     let bounds = scene.world_bounds(id)?;
                     Some((bounds.center(), (bounds.size().x + bounds.size().y) * 0.25))
                 });
                 let outlines = if body.kind == BodyKind::Dynamic { Vec::new() } else { scene.world_outlines(id) };
-                Some(DebugBody { id, kind: body.kind, outlines, circle: circle.flatten() })
+                DebugBody { id, kind: body.kind, outlines, circle: circle.flatten() }
             })
             .collect()
     }

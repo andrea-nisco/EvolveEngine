@@ -250,9 +250,11 @@ impl EditorApp {
             changed |= ui.add(egui::DragValue::new(&mut degrees).speed(0.5).suffix("°")).changed();
         });
         if changed {
-            if let Some(node) = self.scene.find_mut(id) {
-                node.bone = Some(evolve_engine::rig::Bone { length });
-                node.transform = compose(position, degrees.to_radians(), scale);
+            if let Some(mut node) = self.scene.find_mut(id) {
+                if let Some(bone) = node.bone_mut() {
+                    bone.length = length;
+                }
+                node.set_transform(compose(position, degrees.to_radians(), scale));
             }
         }
     }

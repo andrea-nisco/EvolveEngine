@@ -145,9 +145,14 @@ impl EditorApp {
             if delete.on_disabled_hover_text("Still used by instances").clicked() {
                 self.scene.delete_symbol(id);
             }
-            if let Some(symbol) = self.scene.symbols.iter_mut().find(|s| s.id == id) {
+            // Edit a copy and rename only on a change: this runs every frame.
+            if let Some(original) = self.scene.symbol(id).map(|s| s.name.clone()) {
+                let mut name = original.clone();
                 ui.label("Name");
-                ui.add(egui::TextEdit::singleline(&mut symbol.name).desired_width(120.0));
+                ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0));
+                if name != original {
+                    self.scene.rename_symbol(id, &name);
+                }
             }
             ui.weak(format!("{uses} instance{}", if uses == 1 { "" } else { "s" }));
         });

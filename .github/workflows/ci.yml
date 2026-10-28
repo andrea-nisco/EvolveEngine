@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
+      - run: cargo build --workspace --all-targets
+      # Building is done; a test run that takes longer than this is hung (GPU_SAFETY.md F1).
+      - run: cargo test --workspace
+        timeout-minutes: 10
+
+  # Finds out which graphics adapters the hosted runners really have (plan task 0.7, GPU_RENDERER_PLAN.md). It never
+  # fails the build: read its log to see "GPU test on: ..." (an adapter ran the tests) or "skipped: ..." per OS and mode.
+  gpu-probe:
+    name: GPU adapters (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux libraries and Mesa's software Vulkan driver (lavapipe)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev mesa-vulkan-drivers libvulkan1 libegl1
+      - run: cargo test -p evolve_gpu --features egui --no-run
+      - name: Run the GPU tests (one minute at most, GPU_SAFETY.md F1)
+        timeout-minutes: 1
+        run: cargo test -p evolve_gpu --features egui -- --nocapture
+
+  # The one place where the GPU tests must really run. On a machine with no adapter they print "skipped" and pass, so
+  # without this a green build could mean that nothing was tested. Mesa's software Vulkan driver (lavapipe) gives the
+  # runner an adapter; EVOLVE_REQUIRE_GPU=native turns a missing one into a failure. Not yet seen running: if lavapipe
+  # cannot do something a test needs, this job is where it shows (plan task 0.7, OPEN_POINTS.md P1).
+  gpu-required:
+    name: GPU tests (Linux, software Vulkan, must not skip)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EVOLVE_REQUIRE_GPU: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa's software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev mesa-vulkan-drivers libvulkan1 vulkan-tools libegl1
+      - name: Which adapters does this runner have?
+        continue-on-error: true
+        run: vulkaninfo --summary
+      - run: cargo test -p evolve_gpu --features egui --no-run
+      - name: Run the GPU tests (one minute at most, GPU_SAFETY.md F1)
+        timeout-minutes: 1
+        run: cargo test -p evolve_gpu --features egui -- --nocapture
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux libraries
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  web-player:
+    name: Web player (wasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # Must stay equal to the wasm-bindgen crate version in Cargo.lock.
+      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - run: tools/build-web-player.sh
+      # The GPU renderer and the web canary (plan 2.12) must keep compiling for the browser.
+      - run: cargo check -p evolve_gpu -p web_canary --lib --target wasm32-unknown-unknown

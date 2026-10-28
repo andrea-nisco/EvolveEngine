@@ -1,2 +1,5 @@
 /target
 /dist
+
+# Big generated files that must never be committed (an imported map project can be 58 MB; see BENCHMARKS.md).
+/local/

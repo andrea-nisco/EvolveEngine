@@ -1,57 +1,56 @@
 //! The Objects panel (scene tree) and the Inspector panel (property editor).
 
 use crate::app::EditorApp;
-use crate::objects::{icon_of, paint_icon, Icon};
+use crate::objects::{icon_of, paint_icon};
 use crate::theme;
 use eframe::egui::{self, Sense};
 use evolve_engine::geometry::{scale_around, Affine2, Rect, Vec2};
-use evolve_engine::scene::{Node, NodeId, NodeKind};
+use evolve_engine::scene::{Node, NodeId, NodeKind, Scene};
 use evolve_engine::style::{Color, FillRule, Gradient, GradientKind, GradientStop, LineCap, LineJoin, Paint, Stroke};
 use std::collections::HashSet;
 
 // --- Scene tree ------------------------------------------------------------------------------
 
-struct Row {
-    id: NodeId,
+struct Row<'a> {
+    node: &'a Node,
     depth: usize,
-    name: String,
-    icon: Icon,
-    is_group: bool,
-    visible: bool,
-    locked: bool,
 }
 
 /// Where a dragged layer lands relative to the row it was dropped on.
 #[derive(Clone, Copy, PartialEq)]
-enum Place {
+pub(crate) enum Place {
     Above,
     Below,
     Into,
 }
 
-enum TreeAction {
+pub(crate) enum TreeAction {
     Select { id: NodeId, extend: bool },
     ToggleVisible(NodeId),
     ToggleLocked(NodeId),
+    /// The pin: select the object and take the Scene view to it.
+    Locate(NodeId),
     ToggleCollapsed(NodeId),
     Rename(NodeId),
     Duplicate(NodeId),
     Delete(NodeId),
     Drop { dragged: NodeId, target: NodeId, place: Place },
+    /// The name being typed in the rename box.
+    SetName(NodeId, String),
+    StopRenaming,
+}
+
+/// What the tree needs to know to draw itself, besides the scene.
+pub(crate) struct TreeView<'a> {
+    pub collapsed: &'a HashSet<NodeId>,
+    pub selection: &'a [NodeId],
+    pub renaming: Option<NodeId>,
 }
 
 /// Rows top-most first, like the layers panel of most editors.
-fn tree_rows(nodes: &[Node], depth: usize, collapsed: &HashSet<NodeId>, out: &mut Vec<Row>) {
+fn tree_rows<'a>(nodes: &'a [Node], depth: usize, collapsed: &HashSet<NodeId>, out: &mut Vec<Row<'a>>) {
     for node in nodes.iter().rev() {
-        out.push(Row {
-            id: node.id,
-            depth,
-            name: node.name.clone(),
-            icon: icon_of(node),
-            is_group: node.is_group(),
-            visible: node.visible,
-            locked: node.locked,
-        });
+        out.push(Row { node, depth });
         if node.is_group() && !collapsed.contains(&node.id) {
             tree_rows(node.children(), depth + 1, collapsed, out);
         }
@@ -70,6 +69,145 @@ fn drop_place(row: &egui::Response, is_group: bool) -> Place {
     }
 }
 
+/// Draws the tree of all objects in `scene` in a scroll area and returns what the user asked for; the caller
+/// applies it. Only the rows that are on screen are laid out: a scene can have tens of thousands of rows.
+pub(crate) fn show_tree(ui: &mut egui::Ui, scene: &Scene, view: &TreeView) -> Vec<TreeAction> {
+    let mut rows = Vec::new();
+    tree_rows(&scene.nodes, 0, view.collapsed, &mut rows);
+    if rows.is_empty() {
+        ui.weak("Empty. Pick a tool and draw something.");
+    }
+    // Every row is exactly this tall (the minimum height of a line of widgets), which is what lets
+    // the scroll area skip the rows above and below the window.
+    let row_height = ui.spacing().interact_size.y;
+    let mut actions = Vec::new();
+    egui::ScrollArea::vertical().id_salt("tree").auto_shrink([false, false]).show_rows(ui, row_height, rows.len(), |ui, range| {
+        for row in &rows[range] {
+            tree_row(ui, row, view, &mut actions);
+        }
+    });
+    actions
+}
+
+fn tree_row(ui: &mut egui::Ui, row: &Row, view: &TreeView, actions: &mut Vec<TreeAction>) {
+    let node = row.node;
+    ui.horizontal(|ui| {
+        ui.add_space(row.depth as f32 * 14.0);
+        let icon_size = egui::vec2(16.0, 16.0);
+        if node.is_group() {
+            let (_, response) = ui.allocate_exact_size(icon_size, Sense::click());
+            let openness = if view.collapsed.contains(&node.id) { 0.0 } else { 1.0 };
+            egui::collapsing_header::paint_default_icon(ui, openness, &response);
+            if response.clicked() {
+                actions.push(TreeAction::ToggleCollapsed(node.id));
+            }
+        } else {
+            ui.add_space(icon_size.x);
+        }
+        let (icon_rect, _) = ui.allocate_exact_size(icon_size, Sense::hover());
+        let icon_color = if node.visible { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
+        paint_icon(ui.painter(), icon_rect, icon_of(node), icon_color);
+
+        if view.renaming == Some(node.id) {
+            let mut name = node.name.clone();
+            let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(140.0));
+            if edit.changed() {
+                actions.push(TreeAction::SetName(node.id, name));
+            }
+            // Ask for focus only until the field has it: asking every frame would cancel
+            // the focus loss that Enter (or a click elsewhere) causes, and it would never close.
+            if edit.lost_focus() {
+                actions.push(TreeAction::StopRenaming);
+            } else if !edit.has_focus() {
+                edit.request_focus();
+            }
+        } else {
+            tree_label(ui, row, view.selection.contains(&node.id), actions);
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let lock = if node.locked { "🔒" } else { "🔓" };
+            if ui.add(egui::Button::new(lock).frame(false).small()).on_hover_text("Lock").clicked() {
+                actions.push(TreeAction::ToggleLocked(node.id));
+            }
+            let eye = egui::RichText::new("👁").weak().strikethrough();
+            let eye = if node.visible { egui::RichText::new("👁") } else { eye };
+            if ui.add(egui::Button::new(eye).frame(false).small()).on_hover_text("Show / hide").clicked() {
+                actions.push(TreeAction::ToggleVisible(node.id));
+            }
+            if pin_button(ui).clicked() {
+                actions.push(TreeAction::Locate(node.id));
+            }
+        });
+    });
+}
+
+/// The pin at the end of a row: a click takes the Scene view to the object. Drawn, not written, so it looks the same everywhere.
+fn pin_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 16.0), Sense::click());
+    let response = response.on_hover_text("Show in the Scene view");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Show in the Scene view"));
+    let color = if response.hovered() { theme::ACCENT } else { ui.visuals().weak_text_color() };
+    let stroke = egui::Stroke::new(1.4, color);
+    let painter = ui.painter();
+    let head = rect.center() + egui::vec2(0.0, -2.5);
+    painter.circle_stroke(head, 3.8, stroke);
+    painter.circle_filled(head, 1.3, color);
+    painter.line_segment([head + egui::vec2(0.0, 3.8), rect.center() + egui::vec2(0.0, 6.5)], stroke);
+    response
+}
+
+fn tree_label(ui: &mut egui::Ui, row: &Row, selected: bool, actions: &mut Vec<TreeAction>) {
+    let node = row.node;
+    let mut text = egui::RichText::new(&node.name);
+    if !node.visible {
+        text = text.weak();
+    }
+    let response = ui.selectable_label(selected, text).interact(Sense::click_and_drag());
+    response.dnd_set_drag_payload(node.id);
+
+    response.context_menu(|ui| {
+        if ui.button("Rename").clicked() {
+            actions.push(TreeAction::Rename(node.id));
+            ui.close();
+        }
+        if ui.button("Duplicate").clicked() {
+            actions.push(TreeAction::Duplicate(node.id));
+            ui.close();
+        }
+        if ui.button("Delete").clicked() {
+            actions.push(TreeAction::Delete(node.id));
+            ui.close();
+        }
+    });
+    if response.double_clicked() {
+        actions.push(TreeAction::Rename(node.id));
+    } else if response.clicked() {
+        let extend = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+        actions.push(TreeAction::Select { id: node.id, extend });
+    }
+
+    if response.dnd_hover_payload::<NodeId>().is_some() {
+        let place = drop_place(&response, node.is_group());
+        let stroke = egui::Stroke::new(2.0, theme::ACCENT);
+        match place {
+            Place::Above => {
+                ui.painter().hline(response.rect.x_range(), response.rect.top(), stroke);
+            }
+            Place::Below => {
+                ui.painter().hline(response.rect.x_range(), response.rect.bottom(), stroke);
+            }
+            Place::Into => {
+                ui.painter().rect_stroke(response.rect, 2.0, stroke, egui::StrokeKind::Inside);
+            }
+        }
+    }
+    if let Some(dragged) = response.dnd_release_payload::<NodeId>() {
+        let place = drop_place(&response, node.is_group());
+        actions.push(TreeAction::Drop { dragged: *dragged, target: node.id, place });
+    }
+}
+
 impl EditorApp {
     /// The Inspector panel: properties of the selected object (or the document).
     pub fn inspector_pane(&mut self, ui: &mut egui::Ui) {
@@ -80,116 +218,10 @@ impl EditorApp {
 
     /// The tree of all objects (the body of the Objects panel).
     pub(crate) fn scene_tree(&mut self, ui: &mut egui::Ui) {
-        let mut rows = Vec::new();
-        tree_rows(&self.scene.nodes, 0, &self.tree.collapsed, &mut rows);
-        if rows.is_empty() {
-            ui.weak("Empty. Pick a tool and draw something.");
-        }
-
-        let mut actions = Vec::new();
-        for row in &rows {
-            ui.horizontal(|ui| {
-                ui.add_space(row.depth as f32 * 14.0);
-                let icon_size = egui::vec2(16.0, 16.0);
-                if row.is_group {
-                    let (_, response) = ui.allocate_exact_size(icon_size, Sense::click());
-                    let openness = if self.tree.collapsed.contains(&row.id) { 0.0 } else { 1.0 };
-                    egui::collapsing_header::paint_default_icon(ui, openness, &response);
-                    if response.clicked() {
-                        actions.push(TreeAction::ToggleCollapsed(row.id));
-                    }
-                } else {
-                    ui.add_space(icon_size.x);
-                }
-                let (icon_rect, _) = ui.allocate_exact_size(icon_size, Sense::hover());
-                let icon_color = if row.visible { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
-                paint_icon(ui.painter(), icon_rect, row.icon, icon_color);
-
-                if self.tree.renaming == Some(row.id) {
-                    let mut name = row.name.clone();
-                    let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(140.0));
-                    if edit.changed() {
-                        if let Some(node) = self.scene.find_mut(row.id) {
-                            node.name = name;
-                        }
-                    }
-                    // Ask for focus only until the field has it: asking every frame would cancel
-                    // the focus loss that Enter (or a click elsewhere) causes, and it would never close.
-                    if edit.lost_focus() {
-                        self.tree.renaming = None;
-                    } else if !edit.has_focus() {
-                        edit.request_focus();
-                    }
-                } else {
-                    self.tree_label(ui, row, &mut actions);
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let lock = if row.locked { "🔒" } else { "🔓" };
-                    if ui.add(egui::Button::new(lock).frame(false).small()).on_hover_text("Lock").clicked() {
-                        actions.push(TreeAction::ToggleLocked(row.id));
-                    }
-                    let eye = egui::RichText::new("👁").weak().strikethrough();
-                    let eye = if row.visible { egui::RichText::new("👁") } else { eye };
-                    if ui.add(egui::Button::new(eye).frame(false).small()).on_hover_text("Show / hide").clicked() {
-                        actions.push(TreeAction::ToggleVisible(row.id));
-                    }
-                });
-            });
-        }
+        let view = TreeView { collapsed: &self.tree.collapsed, selection: &self.selection, renaming: self.tree.renaming };
+        let actions = show_tree(ui, &self.scene, &view);
         for action in actions {
             self.apply_tree_action(action);
-        }
-    }
-
-    fn tree_label(&self, ui: &mut egui::Ui, row: &Row, actions: &mut Vec<TreeAction>) {
-        let selected = self.selection.contains(&row.id);
-        let mut text = egui::RichText::new(&row.name);
-        if !row.visible {
-            text = text.weak();
-        }
-        let response = ui.selectable_label(selected, text).interact(Sense::click_and_drag());
-        response.dnd_set_drag_payload(row.id);
-
-        response.context_menu(|ui| {
-            if ui.button("Rename").clicked() {
-                actions.push(TreeAction::Rename(row.id));
-                ui.close();
-            }
-            if ui.button("Duplicate").clicked() {
-                actions.push(TreeAction::Duplicate(row.id));
-                ui.close();
-            }
-            if ui.button("Delete").clicked() {
-                actions.push(TreeAction::Delete(row.id));
-                ui.close();
-            }
-        });
-        if response.double_clicked() {
-            actions.push(TreeAction::Rename(row.id));
-        } else if response.clicked() {
-            let extend = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-            actions.push(TreeAction::Select { id: row.id, extend });
-        }
-
-        if response.dnd_hover_payload::<NodeId>().is_some() {
-            let place = drop_place(&response, row.is_group);
-            let stroke = egui::Stroke::new(2.0, theme::ACCENT);
-            match place {
-                Place::Above => {
-                    ui.painter().hline(response.rect.x_range(), response.rect.top(), stroke);
-                }
-                Place::Below => {
-                    ui.painter().hline(response.rect.x_range(), response.rect.bottom(), stroke);
-                }
-                Place::Into => {
-                    ui.painter().rect_stroke(response.rect, 2.0, stroke, egui::StrokeKind::Inside);
-                }
-            }
-        }
-        if let Some(dragged) = response.dnd_release_payload::<NodeId>() {
-            let place = drop_place(&response, row.is_group);
-            actions.push(TreeAction::Drop { dragged: *dragged, target: row.id, place });
         }
     }
 
@@ -206,15 +238,18 @@ impl EditorApp {
                 }
             }
             TreeAction::ToggleVisible(id) => {
-                if let Some(node) = self.scene.find_mut(id) {
-                    node.visible = !node.visible;
+                if let Some(mut node) = self.scene.find_mut(id) {
+                    let visible = !node.visible;
+                    node.set_visible(visible);
                 }
             }
             TreeAction::ToggleLocked(id) => {
-                if let Some(node) = self.scene.find_mut(id) {
-                    node.locked = !node.locked;
+                if let Some(mut node) = self.scene.find_mut(id) {
+                    let locked = !node.locked;
+                    *node.locked_mut() = locked;
                 }
             }
+            TreeAction::Locate(id) => self.locate(id),
             TreeAction::ToggleCollapsed(id) => {
                 if !self.tree.collapsed.remove(&id) {
                     self.tree.collapsed.insert(id);
@@ -230,6 +265,12 @@ impl EditorApp {
                 self.delete_selection();
             }
             TreeAction::Drop { dragged, target, place } => self.drop_layer(dragged, target, place),
+            TreeAction::SetName(id, name) => {
+                if let Some(mut node) = self.scene.find_mut(id) {
+                    *node.name_mut() = name;
+                }
+            }
+            TreeAction::StopRenaming => self.tree.renaming = None,
         }
     }
 
@@ -298,8 +339,10 @@ impl EditorApp {
             }
         });
         if edited != original {
-            if let Some(Node { kind: NodeKind::Instance(instance), .. }) = self.scene.find_mut(id) {
-                *instance = edited;
+            if let Some(mut node) = self.scene.find_mut(id) {
+                if let NodeKind::Instance(instance) = &mut node.kind {
+                    *instance = edited;
+                }
             }
         }
     }
@@ -372,10 +415,14 @@ impl EditorApp {
         if moved {
             self.set_camera_pose(id, center, degrees.to_radians());
         }
-        if let Some(node) = self.scene.find_mut(id) {
-            node.name = name;
-            if let NodeKind::Camera(camera) = &mut node.kind {
-                *camera = edited;
+        // The panel runs every frame; only a real edit may count as a change.
+        let changed = self.scene.find(id).is_some_and(|n| n.name != name || !matches!(&n.kind, NodeKind::Camera(c) if *c == edited));
+        if changed {
+            if let Some(mut node) = self.scene.find_mut(id) {
+                node.name = name;
+                if let NodeKind::Camera(camera) = &mut node.kind {
+                    *camera = edited;
+                }
             }
         }
         true
@@ -385,8 +432,8 @@ impl EditorApp {
     fn set_camera_pose(&mut self, id: NodeId, center: Vec2, rotation: f32) {
         let world = Affine2::from_angle_translation(rotation, center);
         let parent_inverse = self.scene.parent_world(id).inverse();
-        if let Some(node) = self.scene.find_mut(id) {
-            node.transform = parent_inverse * world;
+        if let Some(mut node) = self.scene.find_mut(id) {
+            node.set_transform(parent_inverse * world);
         }
     }
 
@@ -400,13 +447,23 @@ impl EditorApp {
 
     fn node_properties(&mut self, ui: &mut egui::Ui) {
         if let [id] = self.selection[..] {
-            if let Some(node) = self.scene.find_mut(id) {
+            // Edit copies and write back only on a change: this runs every frame.
+            if let Some(node) = self.scene.find(id) {
+                let (mut name, mut clip, is_group) = (node.name.clone(), node.clip, node.is_group());
                 ui.horizontal(|ui| {
                     ui.label("Name");
-                    ui.text_edit_singleline(&mut node.name);
+                    ui.text_edit_singleline(&mut name);
                 });
-                if node.is_group() {
-                    ui.checkbox(&mut node.clip, "Clip to top object");
+                if is_group {
+                    ui.checkbox(&mut clip, "Clip to top object");
+                }
+                if let Some(mut node) = self.scene.find_mut(id).filter(|n| n.name != name || n.clip != clip) {
+                    if node.name != name {
+                        *node.name_mut() = name;
+                    }
+                    if node.clip != clip {
+                        node.set_clip(clip);
+                    }
                 }
             }
         } else {
@@ -445,8 +502,8 @@ impl EditorApp {
             });
             if opacity != before {
                 for id in ids {
-                    if let Some(node) = self.scene.find_mut(id) {
-                        node.opacity = opacity;
+                    if let Some(mut node) = self.scene.find_mut(id) {
+                        node.set_opacity(opacity);
                     }
                 }
             }
@@ -532,7 +589,7 @@ impl EditorApp {
 
     fn edit_shapes(&mut self, ids: &[NodeId], edit: impl Fn(&mut evolve_engine::scene::Shape)) {
         for &id in ids {
-            if let Some(Node { kind: NodeKind::Shape(shape), .. }) = self.scene.find_mut(id) {
+            if let Some(shape) = self.scene.shape_mut(id) {
                 edit(shape);
             }
         }
@@ -689,4 +746,83 @@ fn stroke_options(ui: &mut egui::Ui, stroke: &mut Stroke) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use evolve_engine::scene::Scene;
+
+    struct Frames {
+        ctx: egui::Context,
+        time: f64,
+    }
+
+    impl Frames {
+        fn new() -> Self {
+            Self { ctx: egui::Context::default(), time: 0.0 }
+        }
+
+        /// Runs one frame of the tree in a 300 x 300 window. Returns what the user asked for and how many shapes were painted.
+        fn run(&mut self, scene: &Scene, events: Vec<egui::Event>) -> (Vec<TreeAction>, usize) {
+            self.time += 1.0 / 60.0;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 300.0))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let collapsed = HashSet::new();
+            let view = TreeView { collapsed: &collapsed, selection: &[], renaming: None };
+            let mut actions = Vec::new();
+            let mut output = self.ctx.run_ui(input, |ui| actions = show_tree(ui, scene, &view));
+            output.textures_delta.clear(); // there is no graphics card to hand them to
+            (actions, output.shapes.len())
+        }
+
+        fn click(&mut self, scene: &Scene, at: egui::Pos2) -> Vec<TreeAction> {
+            let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            self.run(scene, vec![egui::Event::PointerMoved(at)]);
+            self.run(scene, vec![button(true)]);
+            self.run(scene, vec![button(false)]).0
+        }
+    }
+
+    fn clicked_node(actions: &[TreeAction]) -> Option<NodeId> {
+        actions.iter().find_map(|a| match a {
+            TreeAction::Select { id, .. } => Some(*id),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_long_tree_paints_only_the_visible_rows_and_clicks_hit_the_row_under_the_pointer() {
+        let mut scene = Scene::default();
+        let ids: Vec<NodeId> = (0..3000)
+            .map(|i| {
+                let node = scene.new_node(format!("node {i}"), NodeKind::Group(Vec::new()));
+                scene.add(node, None)
+            })
+            .collect();
+        let mut frames = Frames::new();
+        let (_, painted) = frames.run(&scene, Vec::new());
+        let (_, painted) = (painted, frames.run(&scene, Vec::new()).1);
+        assert!(painted < 1000, "3000 rows, but {painted} shapes were painted: the hidden rows are being drawn");
+
+        // The top-most object (the last one) is the first row.
+        let first_row = egui::pos2(80.0, 12.0);
+        assert_eq!(clicked_node(&frames.click(&scene, first_row)), Some(ids[2999]), "the first row is the last object");
+
+        // After scrolling far down, the same spot shows a row from deep in the list, and the click still hits it.
+        for _ in 0..40 {
+            frames.run(&scene, vec![egui::Event::PointerMoved(first_row), egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -300.0), modifiers: Default::default(), phase: egui::TouchPhase::Move }]);
+        }
+        for _ in 0..60 {
+            frames.run(&scene, Vec::new());
+        }
+        let clicked = clicked_node(&frames.click(&scene, first_row)).expect("a row is under the pointer");
+        let row_from_top = 2999 - ids.iter().position(|&id| id == clicked).unwrap();
+        assert!(row_from_top > 100, "the list did not scroll (clicked row {row_from_top})");
+        assert!(row_from_top < 3000);
+    }
 }

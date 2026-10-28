@@ -1,0 +1,22 @@
+[package]
+name = "web_canary"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A browser page that runs the evolve_gpu renderer on WebGL2 or WebGPU and reports frame times (plan task 2.12)."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The page only exists in a browser: natively this crate is empty, so `cargo check --workspace` still works.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+evolve_engine = { path = "../../crates/evolve_engine" }
+evolve_gpu = { path = "../../crates/evolve_gpu" }
+wgpu = { version = "30.0.1", default-features = false, features = ["webgl", "webgpu", "wgsl"] }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4"
+web-time = "1.1"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "Node", "HtmlElement", "HtmlCanvasElement", "Response", "Performance", "console"] }
+js-sys = "0.3"
+getrandom = { version = "0.3", features = ["wasm_js"] }

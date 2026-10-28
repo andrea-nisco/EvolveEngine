@@ -1,0 +1,81 @@
+name: Release
+
+# Push a tag such as v0.1.0 to build downloads for Windows, macOS and Linux and attach them to a DRAFT GitHub release
+# (review it, then publish it by hand). "Run workflow" from the Actions tab does the same builds without a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web-player:
+    name: Web player (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # Must stay equal to the wasm-bindgen crate version in Cargo.lock.
+      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - run: tools/build-web-player.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-player
+          path: dist/web-player
+
+  package:
+    name: Package (${{ matrix.label }})
+    needs: web-player
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 on purpose: a program built against an older glibc runs on more distributions.
+          - { os: ubuntu-22.04, label: linux-x86_64 }
+          - { os: windows-latest, label: windows-x86_64 }
+          - { os: macos-latest, label: macos-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
+      - run: cargo build --release -p evolve_editor -p evolve_player
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-player
+          path: dist/web-player
+      - name: Package
+        shell: bash
+        run: tools/package-release.sh "${GITHUB_REF_NAME//\//-}-${{ matrix.label }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.label }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+
+  release:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: packages
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" packages/* --repo "$GITHUB_REPOSITORY" --draft --generate-notes --title "$GITHUB_REF_NAME"

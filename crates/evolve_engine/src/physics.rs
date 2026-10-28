@@ -188,8 +188,8 @@ impl Scene {
     /// Moves a node by `delta` in world space, whatever its parents' transforms are.
     pub fn translate_world(&mut self, id: NodeId, delta: Vec2) {
         let (Some(world), parent_inverse) = (self.world_transform(id), self.parent_world(id).inverse()) else { return };
-        if let Some(node) = self.find_mut(id) {
-            node.transform = parent_inverse * Affine2::from_translation(delta) * world;
+        if let Some(mut node) = self.find_mut(id) {
+            node.set_transform(parent_inverse * Affine2::from_translation(delta) * world);
         }
     }
 }
@@ -264,11 +264,12 @@ impl PhysicsWorld {
 
     /// Advances all dynamic bodies by `dt` seconds and returns the contacts that began or ended.
     pub fn step(&mut self, scene: &mut Scene, dt: f32) -> Vec<Contact> {
-        let ids = scene.all_ids();
-        let bodies: Vec<(NodeId, Body)> = ids
-            .iter()
-            .filter_map(|&id| scene.find(id).filter(|n| n.visible).and_then(|n| n.body.map(|b| (id, b))))
-            .collect();
+        let mut bodies: Vec<(NodeId, Body)> = Vec::new();
+        scene.for_each_node(|node| {
+            if let (true, Some(body)) = (node.visible, node.body) {
+                bodies.push((node.id, body));
+            }
+        });
         let obstacles: Vec<(NodeId, BodyKind, Vec<Polyline>)> = bodies
             .iter()
             .filter(|(_, b)| b.kind != BodyKind::Dynamic)
