@@ -1,9 +1,157 @@
-# EvolveEngine: open items
+# EvolveEngine: plan and open items
 
-Everything the roadmap asked for is implemented (see [README.md](README.md)). This file collects what was
-**left out, simplified or only lightly tested** in each phase, so it can be picked up later.
+**The goal:** a complete, free, open-source (MIT) 2D game editor that people can start from and then *evolve*: change
+the editor itself, together with their game, to fit what that game needs. So the plan has two halves: a base that is
+complete enough to really use, and an editor that is built to be changed.
 
-`- [ ]` open · **(!)** worth doing first · *italics* = a known limit that is a deliberate trade-off, not a bug
+`- [ ]` open · `- [x]` done · **(!)** worth doing first · *italics* = a known limit that is a deliberate trade-off, not a bug
+
+## The plan, in order
+
+### Current track: make the editor handle the IronKrieg map (started 2026-10-13)
+
+Why: IronKrieg (a grand-strategy game, 1 234 provinces and 20 206 border lines) is the real, large project used to
+stress-test and then evolve the editor. The goal is a game that is fast on every platform, built as vectors (map,
+coats of arms, soldiers). The old Unity plan lives in `Desktop\IronkriegEvolveEngine\RustPort`; we follow it only where
+it fits and change anything else. Measure first, fix what the numbers show, then build the GPU renderer, then the game.
+Numbers and how to reproduce them: [BENCHMARKS.md](BENCHMARKS.md).
+
+**Done**
+- [x] `ironkrieg_import` (map export to a project) and `evolve_editor --benchmark`.
+- [x] Culling in the renderer (close-up of the map 63 to 10 ms).
+- [x] Compact project file for big projects (382 MB to 58 MB; load 0.46 to 0.12 s).
+
+**Next, in this order**
+1. [x] Editor costs on the map (2026-10-15): the Objects panel only lays out visible rows (103 to 0.3 ms), selecting many
+       objects is linear instead of cubic (Select All: hours to under 1 ms), the clip preview is made once per frame.
+       The clone only ever happened while a clip plays, not every frame as first assumed.
+       **Still open:** the undo check compares the whole scene on every repaint (3.6 to 4.1 ms); fixing it needs real
+       change tracking (revision counters or shared paths). Also the selection bounds (about 10 ms with everything
+       selected) could be cached.
+2. [x] Re-open the map in the editor window and note what still lags (2026-10-16, twice). First try with the GPU renderer:
+       very slow; causes found by timing the real editor frame and fixed (quadratic overlays and play mode, geometry budget
+       at a change of zoom, no culling; see the plan's progress log of 2026-10-16). Second try: "100 times smoother", a
+       little lag remains now and then. **Next:** find out when (zoom crossing a bucket = P12, mouse release after a drag =
+       undo snapshot ~10 ms, autosave = step 3) using the worst-frame figure in the status bar.
+3. [ ] Autosave off the UI thread (85 ms every 30 s today).
+4. [ ] GPU renderer on wgpu (backend agreed 2026-10-15). The detailed plan, with phases 0 to 8, design decisions,
+       risks and how each phase is verified, is in [GPU_RENDERER_PLAN.md](GPU_RENDERER_PLAN.md), which is also the checklist:
+       tick it and update its logs as work is done. Scope: engine and editor only; IronKrieg is a test scene. Status
+       2026-10-16: Phases 1 to 4 are done (change tracking, the renderer, gradients and thin lines, clips, layers and symbol
+       instances): the GPU renderer draws everything the CPU renderer does except skinned shapes, and the complete illustration
+       scene takes about 17 ms instead of 2.8 s. Still open from them: 3.1 and the "After Phase 4" checks for the owner (MANUAL_TESTS.md),
+       4.8 and 2.12/2.13 on the T2 laptop and in the browser (OPEN_POINTS.md P2), 3.10 (P4). Next action: Phase 5 (speed at scale:
+       the walks over unchanged views, zoom-bucket hitches, true instancing, layer reuse), or Phase 6 (skinned shapes) first.
+5. [ ] Then the game: borders and constant-width strokes (done), coats of arms as SVG (first look done 2026-10-27: random
+       shields over the capitals, fixed 100 km size; still to do: follow the zoom and fade as in the Unity game, shadow, editing a
+       shield, the player's own shield), text and UI (a plan of its own, to write), picking provinces (needs a spatial
+       index; today a click takes about 7 ms), soldiers.
+
+**Open questions for the owner**
+- The open questions in section 8 of [GPU_RENDERER_PLAN.md](GPU_RENDERER_PLAN.md) (performance bar and machine,
+  format change for pixel-width strokes, importance of the web version, when the GPU renderer becomes the default).
+- ~~Where should the imported map and its generated files live?~~ Answered 2026-10-15: `local/` in the repository root,
+  which is in `.gitignore` (OPEN_POINTS.md, P7).
+
+### Phase 1: open-source foundation (before announcing anything)
+
+**Done**
+
+- [x] MIT licence ([LICENSE](LICENSE)), `license` in every Cargo.toml.
+- [x] Continuous integration ([ci.yml](.github/workflows/ci.yml)): build + test on Windows, macOS and Linux, clippy
+      with warnings denied, and the wasm web player.
+- [x] Prebuilt downloads: [release.yml](.github/workflows/release.yml) builds the editor, the player and the web player
+      for Windows, macOS (Apple Silicon) and Linux on a `v*` tag and attaches them to a **draft** release for you to
+      review; [tools/package-release.sh](tools/package-release.sh) does the packing (checked on the Mac: the package
+      unpacks, keeps its executable bits, and its editor exports a game).
+- [x] macOS: builds and passes the tests; autosave / layout folder follows each platform's convention
+      (`~/Library/Application Support`, `~/.local/share`, `%LOCALAPPDATA%`); `tools/build-web-player.sh`; trackpad
+      navigation in the Scene view (two-finger scroll pans, pinch and `Cmd`+scroll zoom, a mouse wheel still zooms;
+      checked by hand on a trackpad).
+- [x] *Export Game (desktop)* on macOS writes a `.app` bundle (the untouched player plus the project as a resource,
+      ad-hoc signed) instead of appending to the program, which had broken the signature. Checked on the Mac: the
+      bundle passes `codesign --verify --strict`, `open` launches it and it plays its game. Unit-tested everywhere.
+- [x] Project-format stability: a frozen fixture per format version
+      ([tests/fixtures](crates/evolve_engine/tests/fixtures)) that must always open, a test that the writer's output for
+      the current version does not change without a version bump, and the rules in CONTRIBUTING.md and the README.
+      Checked by deliberately breaking the format twice (both caught). *Fixtures v1 and v2 are reconstructed from v3, not
+      genuine old files; if you have real ones from early editors, add them next to these.*
+- [x] Community files: [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), issue forms (bug
+      report, feature request), a pull-request checklist, [CHANGELOG.md](CHANGELOG.md), a README for newcomers.
+      *Private conduct reports go to the repository owner's profile contact; replace that with a dedicated address or
+      GitHub's private reporting if you prefer.*
+- [x] Hand tests (2026-10-13, reported by the author): [MANUAL_TESTS.md](MANUAL_TESTS.md) passes, and the Pen tool,
+      Pencil tool, Bézier handle dragging and IK target dragging work.
+- *Decisions:* no Intel Mac build (Apple is retiring Intel Macs); no code signing or notarization for now, so the
+  SmartScreen / Gatekeeper warnings described in the README stay.
+
+**Open: needs a person or another machine**
+
+- [ ] **(!)** Push to a public repository, then fix whatever the first CI run reports (Linux packages and versions in
+      particular), try the release workflow with "Run workflow" before the first tag, and see that the issue forms show up.
+- [ ] Run the editor on Linux by hand (never done) and fix what shows up.
+- [x] On Windows, once: the mouse wheel still zooms in the Scene view (the trackpad change touched that code). *(Checked by the owner, 2026-10-16: zooming with the wheel in the Scene view works.)*
+- [ ] On the Mac, once: *File → Export Game* from the editor's own save dialog (the dialog is not covered by tests;
+      the "Exporting a game" section of [MANUAL_TESTS.md](MANUAL_TESTS.md)).
+- [ ] Optional: map the trackpad's two-finger twist (egui reports it as a rotation) to rotating the view, so a Mac never
+      needs a right button; the rotation direction has to be checked on a real trackpad.
+
+### Phase 2: extensibility (what makes this product different)
+
+Today panels and tools are closed lists in the code ([layout.rs](crates/evolve_editor/src/layout.rs) `Pane`,
+[tools.rs](crates/evolve_editor/src/tools.rs) `Tool`), scripts only run inside the game, a project is one JSON file and
+an object has only the built-in physics body and one script. None of that lets a user change the editor.
+The decision: **a clean Rust core (fork and recompile works) plus editor extensions written in Rhai that travel with the
+project.** Keep the core small and build features such as tilemaps and particles as first-party extensions, which proves
+the system and documents it.
+
+1. [ ] **(!)** Registries: panels, tools, menu commands, inspector sections and asset kinds register themselves instead
+       of being enum variants; the built-in ones become the first users. Do this first: every feature added before it
+       makes it more expensive.
+2. [ ] **(!)** Project folder format: the project JSON plus `assets/` and `extensions/` next to it (a single `.evolve`
+       file keeps working). Also the natural place for images, sounds and shared scripts.
+3. [ ] Editor scripting API: Rhai extensions that add menu commands, panels with simple UI, tools and batch operations
+       on the scene; loaded from the project's `extensions/` folder, hot-reloaded, errors shown in the Console.
+4. [ ] Custom components / properties on objects with an automatic Inspector UI (a game's own data: health, inventory,
+       dialogue). Today an object cannot carry anything but the built-ins.
+5. [ ] Extension manager panel, documented example extensions, a versioned and documented extension API.
+6. [ ] Later, if people ask: native or WASM plugins for other languages.
+
+### Phase 3: the baseline every game needs
+
+- [ ] **(!)** Physics: box and polygon bodies, rotation, continuous collision detection, kinematic bodies (moving
+      platforms), collision layers, one-way platforms, joints. (Details in "Phase 5" below.)
+- [ ] **(!)** Audio: sound assets, a playback API for scripts, export bundling. A tool without sound cannot ship a game.
+- [ ] **(!)** Input: all mouse buttons, wheel, touch (also needed for the web export), gamepad, text input.
+- [ ] **(!)** Save data: globals are lost when the game closes.
+- [ ] **(!)** Text and UI: there is no text object at all, and nearly every game needs labels and menus.
+- [ ] **(!)** Script API gaps: timers (`after(seconds, fn)`), remove / disable nodes, parent and children access,
+      `on_collision_end`, seeded random.
+- [ ] Raster images (PNG / JPG) as a kind of object, for people who mix art styles.
+- [ ] Benchmark the CPU renderer on 4K screens and large scenes; add a render-scale option or the GPU renderer if it
+      disappoints. Profile the per-frame costs listed under "Cross-cutting" before fixing them.
+
+### Phase 4: authoring comfort
+
+- [ ] Align and distribute; more shape tools (rounded rectangle, polygon, star, line, arc); Node tool marquee and
+      multi-anchor move; snapping while scaling, rotating and drawing.
+- [ ] Timeline: zoom and scroll, multi-key selection, copy / paste keys, snap to keys.
+- [ ] A project-wide asset library (symbols and clips belong to one scene today).
+- [ ] Undo for scene-list changes, and an undo history that survives switching scenes.
+- [ ] Script editor basics: line numbers, jump to the error, syntax highlighting.
+- [ ] Play mode: hot-reload of scripts, frame step, time scale, restart without leaving Play mode.
+
+### Phase 5: growth
+
+- [ ] Export presets (resolution, fullscreen, window title), application icon, web loading screen and fullscreen button.
+- [ ] Example projects and templates, a tutorial, a documentation site.
+- [ ] Settings dialog (grid size, theme, shortcuts), shortcut cheat sheet, localization, accessibility.
+
+### Deferred
+
+GPU renderer (now item 4 of the current track above, after the editor-cost fixes), PDF export, Android / iOS wrappers, blend modes and group effects,
+dashed strokes, gradient spread modes. Everything below is the detailed list of known limits per area; the plan above
+picks from it.
 
 ---
 
@@ -76,8 +224,10 @@ All six were completed in the second round of work:
   prompt (Cancel and Don't save), autosave, crash recovery (Recover).
 - Not reproduced: the view zoom jumped from 54% to 89% once during the session; it did not happen again in
   repeated runs of the same steps (possibly stray mouse-wheel input). Keep an eye out for it.
-- Still not tried by hand: the Pen and Pencil tools, dragging Bézier handles, Alt-erase in the Weights tool,
-  Shift-move and Alt-stretch of bones, dragging an IK target, the timeline with Auto-key on skinned or morphing shapes.
+- Tried by hand later (2026-10-13, reported by the author): the Pen and Pencil tools, dragging Bézier handles and
+  dragging an IK target all work.
+- Still not tried by hand: Alt-erase in the Weights tool, Shift-move and Alt-stretch of bones, the timeline with
+  Auto-key on skinned or morphing shapes.
 
 ---
 
@@ -99,6 +249,15 @@ All six were completed in the second round of work:
 
 ## Phase 1: engine and vector renderer
 
+Baseline numbers for the IronKrieg map (21 440 objects, 679 000 points) are in [BENCHMARKS.md](BENCHMARKS.md):
+about 13 fps for the whole map at 1080p, and the same cost when only 0.5% of it is visible.
+
+- [x] Cull objects outside the view (close-up 63 to 10 ms, region 75 to 36 ms; the whole map is unchanged, since all of it is visible).
+- [ ] Cache the converted paths: measured at only 12% of the whole-map frame, so low value for the CPU renderer. Triangles for a GPU renderer are a different matter.
+- [ ] Level of detail: drop points closer than about half a pixel before drawing (saves about 28% at the whole-map view; slightly changes the picture). More useful as a GPU optimization.
+- [ ] Cache the bounds of each shape so culling does not look at every anchor each frame (about 3 ms for the IronKrieg map).
+- [ ] Strokes with a constant width in screen pixels (the game's borders need it).
+- [ ] A node with opacity below 1 is drawn into a full-screen layer of its own; many such nodes would be very slow.
 - [ ] GPU renderer option for very large scenes (today: CPU tiny-skia, redrawn on every repaint; no dirty-region tracking).
 - [ ] Cache rendered layers / static parts of the scene.
 - [ ] Optional clipping or dimming of content outside the camera frame in the Scene view (the Game view and exports already show the frame only).
@@ -135,7 +294,9 @@ All six were completed in the second round of work:
 - [ ] Symbols that contain skinned shapes or bones.
 - [ ] Asset browser: sounds, scripts, images and vector files (today only symbols); folders, search, rename on disk.
 - [ ] Shared script files / modules (today a script lives inside one node).
-- [ ] Project format: migrations between versions (only version 1 exists), compressed or binary variant for big projects.
+- [x] Project format: big projects are written on one line (IronKrieg map: 382 MB to 58 MB, load 0.46 s to 0.12 s).
+- [ ] Project format: omit zero handles (about half of the remaining size; needs a new format version), an optional
+      gzip for exporting / sharing (58 MB to 4.4 MB), autosave off the UI thread (85 ms every 30 s), migrations between versions.
 - [ ] Recent files list, restore view settings (grid, zoom). (Autosave, crash recovery and the panel layout are done.)
 - [ ] Project folder with assets next to the `.evolve` file instead of a single JSON.
 
@@ -185,8 +346,8 @@ All six were completed in the second round of work:
 - [ ] Web export: loading screen, further size reductions (rhai features, trimming egui; the wasm is now 6.5 MB,
       about 1.7 MB gzipped), touch input, fullscreen button, a ready-made
       local test server script, hosting guide. *Needs an http server; it cannot run from `file://`.*
-- [ ] Other platforms: macOS and Linux builds and `.app` / AppImage packaging (the code is portable but only
-      Windows has been built and run). Android / iOS wrappers.
+- [ ] Other platforms: macOS builds and runs (checked 2026-10-13); `.app` and AppImage packaging, and the Linux
+      editor run, are still to do (see Phase 1). Android / iOS wrappers.
 - [ ] Audio: sound assets, playback API for scripts, export bundling.
 - [ ] Export presets (resolution, fullscreen, window title) stored in the project.
 
@@ -195,12 +356,15 @@ All six were completed in the second round of work:
 - [ ] **GUI testing:** the main paths of the Node, Bone and Weights tools were tried by hand (see above), but the
       remaining ones listed there were not. Add a manual checklist or UI-level tests. Keep GUI automation safe: confirm
       the target window is in front before every input event (the helper used for the second round does this).
-- [ ] Continuous integration: `cargo test`, `cargo clippy`, wasm build on every push. No git repository exists yet
-      (`git init`, first commit).
-- [ ] Licence file, contributing notes, changelog.
+- [x] Continuous integration (workflow written, see Phase 1) and git repository.
+- [x] Licence file and contributing notes. [ ] Changelog.
 - [ ] Example projects and a short tutorial (the built-in sample is the only example).
-- [ ] Performance: the history compares the whole scene every frame, clip preview clones the scene each frame,
-      thumbnails are all redrawn on any change, physics re-flattens static outlines every step.
+- [ ] **(!)** Performance, measured on the IronKrieg map: the undo check costs 3.6 ms per repaint; the clip-preview clone
+      (14 ms) only happens while a clip plays (see BENCHMARKS.md). Also: thumbnails are all redrawn on any change, physics re-flattens static outlines every step.
+- [x] Performance of deleting and grouping many objects (2026-10-20): `evolve_editor --benchmark` on the 21,200-shape stress scene
+      deleted 4,000 selected objects in 1.3 s and grouped them in 1.4 s (the cost grew with the square of the number: `Scene::remove` and
+      `move_node` once per object, each a search of the tree and a shift of the list of siblings). `Scene::remove_all` and `Scene::group`
+      now take the nodes out in one walk: 3 ms and 2 ms. Tests in `remove_tests.rs` compare both with the one-at-a-time versions.
 - [ ] Dependency pins: egui / eframe 0.36, `wasm-bindgen` CLI must stay equal to the crate version (0.2.129).
       Plan an upgrade routine.
 - [ ] Settings dialog (grid size, theme, shortcuts), a keyboard-shortcut cheat sheet inside the app, localization.

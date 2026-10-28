@@ -3,6 +3,8 @@
 use crate::anim::AnimState;
 use crate::assets::AssetsState;
 use crate::canvas::RenderTarget;
+use crate::renderers::{RendererChoice, RendererSettings};
+use evolve_gpu::profile::Quality;
 use crate::autosave::{self, Recovery};
 use crate::dialogs::{DialogState, Dialogs, Pending};
 use crate::game::{GameView, PlayState};
@@ -28,11 +30,16 @@ use evolve_engine::scene::{NodeId, NodeKind, Scene, Shape};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+/// The least of the scene (as a share of its largest side; about 5 km on a map of the world, where the median border is 2 km long, a province some 200 km and 74% of the objects are under 26 km) that the pin of the Objects panel shows around an object.
+pub(crate) const LOCATE_CONTEXT: f32 = 0.0005;
+
 pub struct ViewSettings {
     pub show_grid: bool,
     pub snap_to_grid: bool,
     pub smart_guides: bool,
     pub grid_size: f32,
+    /// The frame times in the status bar.
+    pub show_frame_times: bool,
 }
 
 /// State owned by the viewports: cached render targets and the interaction in progress.
@@ -40,14 +47,19 @@ pub struct CanvasState {
     /// Where the Scene view and the Game view are rasterized.
     pub scene_target: RenderTarget,
     pub game_target: RenderTarget,
-    /// Pointer position in world space while it is over the Game view (what the game sees as its mouse).
+    /// Pointer position in world space while it is over the Game view (what the game sees as its mouse), and while a drag with the
+    /// right button that began over it goes on outside it.
     pub game_cursor: Option<Vec2>,
+    /// The right button went down over the Game view and is still down.
+    pub game_drag: bool,
     pub drag: Drag,
     pub pen: PenPath,
     pub anchor: Option<AnchorRef>,
     pub cursor: Option<Vec2>,
     pub guides: Vec<Guide>,
     pub needs_frame: bool,
+    /// The last scroll input came from a trackpad (or other pixel-precise device), not a mouse wheel.
+    pub trackpad_scroll: bool,
 }
 
 #[derive(Default)]
@@ -68,6 +80,12 @@ pub struct EditorApp {
     pub selection: Vec<NodeId>,
     pub tool: Tool,
     pub history: History,
+    /// Which renderer draws the Scene and Game views, and the graphics device the GPU renderer would use.
+    pub renderers: RendererSettings,
+    pub frame_stats: crate::frame_stats::FrameStats,
+    /// The cap on the frame rate while a game runs or a clip plays (View -> Frame rate).
+    pub frame_limit: crate::frame_limit::FrameLimit,
+    pub pacer: crate::frame_limit::Pacer,
     pub file: Option<PathBuf>,
     pub dirty: bool,
     pub view: ViewSettings,
@@ -98,13 +116,30 @@ pub struct EditorApp {
 }
 
 impl EditorApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, renderer: RendererChoice, quality: Quality) -> Self {
         theme::apply(&cc.egui_ctx);
-        let project = sample::project();
-        let open = sample::OPEN_AT_START;
+        let mut app = Self::from_project(sample::project(), sample::OPEN_AT_START);
+        app.renderers = RendererSettings::new(renderer, cc.wgpu_render_state.as_ref());
+        app.renderers.set_quality(quality);
+        if renderer != RendererChoice::Cpu {
+            app.status = match app.renderers.adapter() {
+                Some(adapter) => format!("{renderer} renderer requested; graphics card: {adapter}"),
+                None => format!("{renderer} renderer requested, but there is no usable graphics card: using the CPU renderer"),
+            };
+        }
+        app
+    }
+
+    /// An editor with `project` loaded and scene `open` being edited. (Separate from `new` so that tests can build
+    /// one without a window.)
+    pub(crate) fn from_project(project: Project, open: usize) -> Self {
         let scene = project.scenes[open].clone();
         Self {
             history: History::new(&scene),
+            renderers: RendererSettings::without_gpu(RendererChoice::Cpu),
+            frame_stats: Default::default(),
+            frame_limit: crate::frame_limit::FrameLimit::Display,
+            pacer: Default::default(),
             scene,
             project,
             open,
@@ -114,17 +149,19 @@ impl EditorApp {
             tool: Tool::Select,
             file: None,
             dirty: false,
-            view: ViewSettings { show_grid: true, snap_to_grid: false, smart_guides: true, grid_size: 20.0 },
+            view: ViewSettings { show_grid: true, snap_to_grid: false, smart_guides: true, grid_size: 20.0, show_frame_times: true },
             canvas: CanvasState {
                 scene_target: RenderTarget::default(),
                 game_target: RenderTarget::default(),
                 game_cursor: None,
+                game_drag: false,
                 drag: Drag::None,
                 pen: Vec::new(),
                 anchor: None,
                 cursor: None,
                 guides: Vec::new(),
                 needs_frame: true,
+                trackpad_scroll: false,
             },
             tree: TreeState::default(),
             assets: AssetsState::default(),
@@ -296,7 +333,13 @@ impl EditorApp {
             self.status = "The player is missing next to the editor. Build it with: cargo build --release -p evolve_player".into();
             return;
         };
-        let default_name = if cfg!(windows) { "game.exe" } else { "game" };
+        let default_name = if cfg!(windows) {
+            "game.exe"
+        } else if cfg!(target_os = "macos") {
+            "game.app"
+        } else {
+            "game"
+        };
         let Some(output) = rfd::FileDialog::new().set_title("Export game").set_file_name(default_name).save_file() else { return };
         self.sync_open_scene();
         let result = io::project_to_string(&self.project).and_then(|json| bundle::export_desktop(&player, &json, &output));
@@ -309,7 +352,7 @@ impl EditorApp {
     /// Saves a folder with `index.html` that plays the game in a browser.
     pub fn export_web_dialog(&mut self) {
         let Some(player_dir) = bundle::find_web_player_dir() else {
-            self.status = "The web player is not built yet. Run tools/build-web-player.ps1 once".into();
+            self.status = "The web player is not built yet. Run tools/build-web-player.ps1 (Windows) or .sh (macOS, Linux) once".into();
             return;
         };
         let Some(folder) = rfd::FileDialog::new().set_title("Export for web: choose a folder").pick_folder() else { return };
@@ -352,10 +395,8 @@ impl EditorApp {
     pub fn remove_selected(&mut self) -> bool {
         let removable = self.scene.deletable(&self.selection);
         let kept_camera = removable.len() < self.scene.top_level_selection(&self.selection).len();
-        for &id in &removable {
-            self.scene.remove(id);
-        }
-        self.selection.retain(|id| self.scene.find(*id).is_some());
+        self.scene.remove_all(&removable);
+        self.scene.retain_existing(&mut self.selection);
         if kept_camera {
             self.notify("A scene needs a camera, so it was not deleted");
         }
@@ -368,8 +409,9 @@ impl EditorApp {
         let mut copies = Vec::new();
         for id in sources {
             if let Some(copy) = self.scene.duplicate(id) {
-                if let Some(node) = self.scene.find_mut(copy) {
-                    node.name = format!("{} copy", node.name);
+                if let Some(mut node) = self.scene.find_mut(copy) {
+                    let name = format!("{} copy", node.name);
+                    *node.name_mut() = name;
                 }
                 let start = self.scene.world_transform(copy).unwrap_or_default();
                 self.apply_world_delta(&[(copy, start)], offset);
@@ -427,8 +469,8 @@ impl EditorApp {
 
     pub fn release_clip_selection(&mut self) {
         for &id in &self.selection {
-            if let Some(node) = self.scene.find_mut(id) {
-                node.clip = false;
+            if let Some(mut node) = self.scene.find_mut(id) {
+                node.set_clip(false);
             }
         }
     }
@@ -457,6 +499,25 @@ impl EditorApp {
             Some(b) => self.camera.frame(b.center(), b.size().max(Vec2::splat(1.0)) * 1.2),
             None => self.frame_camera(),
         }
+    }
+
+    /// Takes the Scene view to the object `id` (the pin in the Objects panel) and selects it. The view shows it with some of what is
+    /// around it: never less than half a thousandth of the scene's own size, or a thin border or a speck would fill the view with nothing
+    /// that can be recognised.
+    pub fn locate(&mut self, id: NodeId) {
+        self.canvas.anchor = None;
+        self.selection = vec![id];
+        let Some(bounds) = self.scene.selection_bounds(&self.selection) else { return self.frame_camera() };
+        let whole = self.scene.selection_bounds(&self.scene.all_ids()).map_or(0.0, |all| all.size().max_element());
+        let size = (bounds.size() * 1.2).max(Vec2::splat((whole * LOCATE_CONTEXT).max(1.0)));
+        self.camera.frame(bounds.center(), size);
+        // What it did, in words, so that a surprising view can be told about exactly.
+        let name = self.scene.find(id).map_or(String::new(), |node| node.name.clone());
+        let shown = self.camera.viewport / self.camera.zoom;
+        self.status = format!(
+            "Pin: {name}: {:.1} x {:.1}, view {:.0} x {:.0} (at least {:.0}), zoom {:.3}",
+            bounds.size().x, bounds.size().y, shown.x, shown.y, whole * LOCATE_CONTEXT, self.camera.zoom
+        );
     }
 
     // --- Frame ---------------------------------------------------------------------------------
@@ -541,8 +602,13 @@ impl EditorApp {
         }
     }
 
+    /// Whether the editor asks for a new frame as soon as one is done: a game runs, or a clip plays.
+    pub(crate) fn draws_continuously(&self) -> bool {
+        self.play.is_some() || self.anim.playing
+    }
+
     /// Bookkeeping at the end of each frame: undo history, stale selection, window title.
-    fn after_frame(&mut self, ctx: &egui::Context) {
+    pub(crate) fn after_frame(&mut self, ctx: &egui::Context) {
         // An edit in progress (mouse held, or typing into a text field) is committed when it ends.
         let busy = ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input();
         // Derived state first (animation pose, then IK), so only the user's own edits remain as
@@ -557,7 +623,7 @@ impl EditorApp {
         }
         self.autosave_tick(ctx, busy);
         self.save_layout_if_changed(busy);
-        self.selection.retain(|&id| self.scene.find(id).is_some());
+        self.scene.retain_existing(&mut self.selection);
         if self.canvas.anchor.is_some_and(|a| !self.anchor_exists(a)) {
             self.canvas.anchor = None;
         }
@@ -574,9 +640,14 @@ impl EditorApp {
 impl eframe::App for EditorApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.frame_stats.begin();
+        if let Some(message) = self.renderers.poll() {
+            self.status = message; // a lost device or a reported card error: the views go on with the CPU renderer
+        }
         self.handle_shortcuts(&ctx);
         self.anim.timeline_visible = false; // the Timeline panel sets it again while it is drawn
         self.advance_playback(&ctx);
+        self.update_preview();
         self.update_game(&ctx);
 
         self.menu_bar(ui);
@@ -587,5 +658,8 @@ impl eframe::App for EditorApp {
         self.show_dialogs(&ctx);
         self.watch_window_close(&ctx);
         self.after_frame(&ctx);
+        self.frame_stats.end();
+        // Drawing every frame anyway: a running game, a playing clip. Then the cap holds the next frame back.
+        self.pacer.end_of_frame(self.frame_limit, self.draws_continuously());
     }
 }

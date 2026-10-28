@@ -98,7 +98,13 @@ impl Scene {
 
     /// The camera the game is shown through: the first one in document order.
     pub fn main_camera(&self) -> Option<NodeId> {
-        self.all_ids().into_iter().find(|&id| matches!(self.find(id).map(|n| &n.kind), Some(NodeKind::Camera(_))))
+        let mut first = None;
+        self.for_each_node(|node| {
+            if first.is_none() && matches!(node.kind, NodeKind::Camera(_)) {
+                first = Some(node.id);
+            }
+        });
+        first
     }
 
     /// The top-level objects of `ids` that can be deleted without leaving the scene without a camera.
@@ -106,8 +112,12 @@ impl Scene {
     /// or the group around it) is left out. Scenes that have no camera to begin with are not affected.
     pub fn deletable(&self, ids: &[NodeId]) -> Vec<NodeId> {
         let mut top = self.top_level_selection(ids);
-        let is_camera = |id: &NodeId| matches!(self.find(*id).map(|n| &n.kind), Some(NodeKind::Camera(_)));
-        let cameras: Vec<NodeId> = self.all_ids().into_iter().filter(is_camera).collect();
+        let mut cameras: Vec<NodeId> = Vec::new();
+        self.for_each_node(|node| {
+            if matches!(node.kind, NodeKind::Camera(_)) {
+                cameras.push(node.id);
+            }
+        });
         let doomed = |camera: &NodeId| top.iter().any(|&id| id == *camera || self.is_descendant(id, *camera));
         if !cameras.is_empty() && cameras.iter().all(doomed) {
             let main = cameras[0];

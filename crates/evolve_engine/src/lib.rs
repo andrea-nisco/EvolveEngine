@@ -6,6 +6,7 @@
 //! - [`camera`]: pan / zoom / rotate view of the editor
 //! - [`game_camera`]: the camera object that frames what the player sees
 //! - [`render`]: tiny-skia rasterizer
+//! - [`revision`]: change tracking (what changed since a renderer last looked)
 //! - [`io`]: project files and SVG import
 
 pub mod animation;
@@ -21,6 +22,15 @@ pub mod path;
 pub mod physics;
 pub mod project;
 pub mod render;
+pub mod revision;
+#[cfg(test)]
+mod revision_tests;
+#[cfg(test)]
+mod journal_tests;
+#[cfg(test)]
+mod hit_tests;
+#[cfg(test)]
+mod remove_tests;
 pub mod rig;
 pub mod runtime;
 pub mod scene;

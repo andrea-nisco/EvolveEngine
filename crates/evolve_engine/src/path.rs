@@ -245,6 +245,36 @@ impl Path {
         Rect::from_cloud(polylines.iter().flat_map(|p| p.points.iter().copied()))
     }
 
+    /// The bounds of this path moved by `m`, the same as `self.transformed(m).bounds()`. A path of straight lines only (the usual one on
+    /// a map: no handles) has the box of its moved anchors, found with no copy of the path and no flattening; with the selection of a
+    /// whole map this is the difference between 4 ms and 1 ms.
+    pub fn bounds_under(&self, m: &Affine2) -> Option<Rect> {
+        let straight = self.subpaths.iter().flat_map(|s| &s.anchors).all(|a| a.handle_in == Vec2::ZERO && a.handle_out == Vec2::ZERO);
+        if !straight {
+            return self.transformed(m).bounds();
+        }
+        Rect::from_cloud(self.subpaths.iter().flat_map(|s| &s.anchors).map(|a| m.transform_point2(a.pos)))
+    }
+
+    /// The box of the anchors and their handles. A curve lies inside the hull of its control points, so the whole path is inside
+    /// this box, which costs a pass over the points and no flattening. `None` for a path with no points, or with a point that is not a
+    /// number (callers then take the exact route).
+    pub fn control_bounds(&self) -> Option<Rect> {
+        let mut found: Option<Rect> = None;
+        for anchor in self.subpaths.iter().flat_map(|s| s.anchors.iter()) {
+            for p in [anchor.pos, anchor.pos + anchor.handle_in, anchor.pos + anchor.handle_out] {
+                if !p.is_finite() {
+                    return None;
+                }
+                found = Some(match found {
+                    Some(r) => Rect { min: r.min.min(p), max: r.max.max(p) },
+                    None => Rect { min: p, max: p },
+                });
+            }
+        }
+        found
+    }
+
     /// Point-in-shape test using the given fill rule. Open subpaths count as closed.
     pub fn contains(&self, p: Vec2, rule: FillRule, tolerance: f32) -> bool {
         let (mut winding, mut crossings) = (0i32, 0u32);
@@ -339,6 +369,32 @@ mod tests {
         assert_eq!((parts[0].anchors.len(), parts[1].anchors.len()), (3, 2));
         assert!(line.split_at_anchor(0).is_none());
         assert!(line.split_at_anchor(3).is_none());
+    }
+
+    #[test]
+    fn the_bounds_of_a_moved_path_are_those_of_the_moved_path() {
+        let polyline = Path { subpaths: vec![SubPath { anchors: [(3.0, 1.0), (40.0, -7.0), (12.0, 30.0), (-5.0, 9.0)].map(|(x, y)| Anchor::corner(Vec2::new(x, y))).to_vec(), closed: false }] };
+        let mut two_parts = Path::rect(Vec2::new(-4.0, -2.0), Vec2::new(10.0, 6.0));
+        two_parts.subpaths.extend(Path::rect(Vec2::new(100.0, 50.0), Vec2::new(130.0, 80.0)).subpaths);
+        let lone_point = Path { subpaths: vec![SubPath { anchors: vec![Anchor::corner(Vec2::new(7.0, -3.0))], closed: false }] };
+        let one_curve = Path::ellipse(Vec2::new(5.0, 5.0), Vec2::new(10.0, 4.0));
+        // A handle on only one side of an edge still bends it: out of the first corner, and into the second.
+        let mut bent_out = Path::rect(Vec2::ZERO, Vec2::splat(10.0));
+        bent_out.subpaths[0].anchors[1].handle_out = Vec2::new(8.0, 0.0);
+        let mut bent_in = Path::rect(Vec2::ZERO, Vec2::splat(10.0));
+        bent_in.subpaths[0].anchors[2].handle_in = Vec2::new(8.0, 0.0);
+        let moves = [
+            Affine2::IDENTITY,
+            Affine2::from_translation(Vec2::new(30.0, -20.0)),
+            Affine2::from_angle(0.7) * Affine2::from_scale(Vec2::new(2.0, 0.5)),
+            Affine2::from_translation(Vec2::new(-8.0, 2.0)) * Affine2::from_angle(-2.1) * Affine2::from_scale(Vec2::splat(1.5)),
+        ];
+        for (name, path) in [("polyline", &polyline), ("two parts", &two_parts), ("lone point", &lone_point), ("ellipse", &one_curve), ("a handle out", &bent_out), ("a handle in", &bent_in), ("nothing", &Path::default())] {
+            for m in &moves {
+                assert_eq!(path.bounds_under(m), path.transformed(m).bounds(), "{name} under {m:?}");
+            }
+        }
+        assert!(Path::default().bounds_under(&Affine2::IDENTITY).is_none());
     }
 
     #[test]

@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, Painter, Rect, Stroke};
 use evolve_engine::camera::Camera;
 use evolve_engine::physics::{Body, BodyKind};
 use evolve_engine::runtime::{LogLine, Runtime};
-use evolve_player_core::input::collect_input;
+use evolve_player_core::input::collect_input_over;
 use evolve_engine::scene::{Node, NodeKind};
 use evolve_engine::script::{check_script, SCRIPT_TEMPLATE};
 
@@ -86,6 +86,9 @@ impl EditorApp {
     pub fn update_game(&mut self, ctx: &egui::Context) {
         // The game's mouse is the pointer over the Game view (or over the Scene view when the Game view is hidden).
         let mouse = self.canvas.game_cursor.or(self.canvas.cursor).unwrap_or_default();
+        // The wheel and a right button that goes down belong to the game only over the Game view (the Scene view keeps them for moving
+        // its own camera).
+        let over_game = self.canvas.game_cursor.is_some();
         let Some(play) = &mut self.play else { return };
         ctx.request_repaint();
         let dt = ctx.input(|i| i.stable_dt);
@@ -93,7 +96,7 @@ impl EditorApp {
         if play.paused {
             return;
         }
-        play.runtime.update(dt, collect_input(ctx, mouse));
+        play.runtime.update(dt, collect_input_over(ctx, mouse, over_game));
     }
 
     // --- Overlays ------------------------------------------------------------------------------
@@ -113,8 +116,7 @@ impl EditorApp {
                     BodyKind::Dynamic => Color32::from_rgb(80, 200, 255),
                 };
                 for outline in &body.outlines {
-                    let points = screen.pts(&outline.points);
-                    painter.add(if outline.closed { egui::Shape::closed_line(points, Stroke::new(1.5, color)) } else { egui::Shape::line(points, Stroke::new(1.5, color)) });
+                    painter.add(crate::overlay::outline_shape(&screen.pts(&outline.points), outline.closed, Stroke::new(1.5, color)));
                 }
                 if let Some((center, radius)) = body.circle {
                     painter.circle_stroke(screen.pt(center), radius * camera.zoom, Stroke::new(1.5, color));
@@ -181,54 +183,72 @@ impl EditorApp {
 
     fn physics_section(&mut self, ui: &mut egui::Ui) {
         let [id] = self.selection[..] else { return };
-        let Some(node) = self.scene.find_mut(id).filter(|n| n.bone.is_none()) else { return };
+        // Edit a copy and write it back only when it changed: the panel runs every frame, and writing to the node
+        // every frame would count as a change every frame.
+        let Some(original) = self.scene.find(id).filter(|n| n.bone.is_none()).map(|n| n.body) else { return };
         ui.separator();
         ui.strong("Physics");
-        let mut enabled = node.body.is_some();
+        let mut body = original;
+        let mut enabled = body.is_some();
         if ui.checkbox(&mut enabled, "Collision body").on_hover_text("Lets this object collide in the game").changed() {
-            node.body = enabled.then(|| Body::new(BodyKind::Static));
+            body = enabled.then(|| Body::new(BodyKind::Static));
         }
-        let Some(body) = &mut node.body else { return };
-        egui::ComboBox::from_id_salt("body_kind")
-            .selected_text(match body.kind {
-                BodyKind::Static => "Static (solid, fixed)",
-                BodyKind::Dynamic => "Dynamic (a moving circle)",
-                BodyKind::Trigger => "Trigger (reports overlaps)",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut body.kind, BodyKind::Static, "Static (solid, fixed)");
-                ui.selectable_value(&mut body.kind, BodyKind::Dynamic, "Dynamic (a moving circle)");
-                ui.selectable_value(&mut body.kind, BodyKind::Trigger, "Trigger (reports overlaps)");
-            });
-        if body.kind == BodyKind::Dynamic {
-            ui.add(egui::Slider::new(&mut body.restitution, 0.0..=1.0).text("Bounce"));
-            ui.add(egui::Slider::new(&mut body.friction, 0.0..=1.0).text("Friction"));
-            ui.add(egui::Slider::new(&mut body.gravity_scale, -2.0..=3.0).text("Gravity"));
+        if let Some(body) = &mut body {
+            egui::ComboBox::from_id_salt("body_kind")
+                .selected_text(match body.kind {
+                    BodyKind::Static => "Static (solid, fixed)",
+                    BodyKind::Dynamic => "Dynamic (a moving circle)",
+                    BodyKind::Trigger => "Trigger (reports overlaps)",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut body.kind, BodyKind::Static, "Static (solid, fixed)");
+                    ui.selectable_value(&mut body.kind, BodyKind::Dynamic, "Dynamic (a moving circle)");
+                    ui.selectable_value(&mut body.kind, BodyKind::Trigger, "Trigger (reports overlaps)");
+                });
+            if body.kind == BodyKind::Dynamic {
+                ui.add(egui::Slider::new(&mut body.restitution, 0.0..=1.0).text("Bounce"));
+                ui.add(egui::Slider::new(&mut body.friction, 0.0..=1.0).text("Friction"));
+                ui.add(egui::Slider::new(&mut body.gravity_scale, -2.0..=3.0).text("Gravity"));
+            }
+        }
+        if body != original {
+            if let Some(mut node) = self.scene.find_mut(id) {
+                node.set_body(body);
+            }
         }
     }
 
     fn script_section(&mut self, ui: &mut egui::Ui) {
         let [id] = self.selection[..] else { return };
-        let Some(node) = self.scene.find_mut(id).filter(|n| n.bone.is_none()) else { return };
+        let Some(original) = self.scene.find(id).filter(|n| n.bone.is_none()).map(|n| n.script.clone()) else { return };
         ui.separator();
         ui.strong("Script");
-        let Some(source) = node.script.as_mut() else {
-            if ui.button("Add script").clicked() {
-                node.script = Some(SCRIPT_TEMPLATE.to_string());
+        let mut script = original.clone();
+        match &mut script {
+            None => {
+                if ui.button("Add script").clicked() {
+                    script = Some(SCRIPT_TEMPLATE.to_string());
+                }
             }
-            return;
-        };
-        ui.add(egui::TextEdit::multiline(source).code_editor().desired_rows(10).desired_width(f32::INFINITY));
-        match check_script(source) {
-            Ok(()) => {
-                ui.weak("Handlers: on_init(me), on_update(me, dt), on_input(me, key), on_collision(me, other), on_trigger(me, other, entered)");
-            }
-            Err(error) => {
-                ui.colored_label(Color32::from_rgb(255, 110, 100), error);
+            Some(source) => {
+                ui.add(egui::TextEdit::multiline(source).code_editor().desired_rows(10).desired_width(f32::INFINITY));
+                match check_script(source) {
+                    Ok(()) => {
+                        ui.weak("Handlers: on_init(me), on_update(me, dt), on_input(me, key), on_collision(me, other), on_trigger(me, other, entered)");
+                    }
+                    Err(error) => {
+                        ui.colored_label(Color32::from_rgb(255, 110, 100), error);
+                    }
+                }
+                if ui.button("Remove script").clicked() {
+                    script = None;
+                }
             }
         }
-        if ui.button("Remove script").clicked() {
-            node.script = None;
+        if script != original {
+            if let Some(mut node) = self.scene.find_mut(id) {
+                node.set_script(script);
+            }
         }
     }
 }

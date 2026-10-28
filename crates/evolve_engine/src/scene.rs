@@ -7,9 +7,12 @@ use crate::geometry::{mean_scale, Affine2, Rect, Vec2};
 use crate::path::Path;
 use crate::style::{Color, FillRule, Paint, Stroke};
 use crate::physics::Body;
+use crate::revision::{Changes, Meta, NodeMut, Revs, SceneRevs, Stamp};
 use crate::rig::{Bone, Ik, Skin};
 use crate::symbol::{Instance, Symbol};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
@@ -71,6 +74,9 @@ pub struct Node {
     /// Transform relative to the parent node.
     pub transform: Affine2,
     pub kind: NodeKind,
+    /// Which versions of this node's content exist; see [`crate::revision`]. Not saved, not compared.
+    #[serde(skip)]
+    pub revs: Meta<Revs>,
 }
 
 impl Node {
@@ -122,6 +128,71 @@ pub struct Scene {
     pub ik: Vec<Ik>,
     /// Source of ids for nodes and symbols.
     pub(crate) next_id: u64,
+    /// Which versions of the scene exist; see [`crate::revision`]. Not saved, not compared.
+    #[serde(skip)]
+    pub(crate) revs: Meta<SceneRevs>,
+    /// What hit tests remember between calls; see [`HitCache`]. Not saved, not compared.
+    #[serde(skip)]
+    pub(crate) hits: Meta<HitCache>,
+}
+
+/// Per node id: the geometry stamp a box was measured for, and the box.
+type Boxes = Vec<Option<(Stamp, Option<Rect>)>>;
+
+/// What [`Scene::hit_test`] remembers between calls: the box of every shape's control points, found by the shape's node id and
+/// good for as long as the node's geometry stamp is the one it was measured for (see [`crate::revision`]). The box lets a hit test
+/// skip the shapes the point is far from, without flattening their paths, which is nearly all of them. A copy of a scene starts with
+/// nothing (undo makes copies, and a copy's stamps may mean another outline).
+#[derive(Default)]
+pub(crate) struct HitCache {
+    boxes: Mutex<Boxes>,
+}
+
+impl Clone for HitCache {
+    fn clone(&self) -> Self {
+        HitCache::default()
+    }
+}
+
+impl std::fmt::Debug for HitCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HitCache")
+    }
+}
+
+/// Ids above this are measured every time instead of being remembered (the memory is a slot for each id up to the largest).
+const MAX_CACHED_ID: u64 = 1 << 22;
+
+/// The box of the control points of `shape` (the shape of `node`), from `cache` when its geometry stamp is the one it was measured for.
+fn control_box(cache: &mut Boxes, node: &Node, shape: &Shape) -> Option<Rect> {
+    if node.id.0 >= MAX_CACHED_ID {
+        return shape.path.control_bounds();
+    }
+    let slot = node.id.0 as usize;
+    if slot >= cache.len() {
+        cache.resize(slot + 1, None);
+    }
+    match cache[slot] {
+        Some((stamp, found)) if stamp == node.revs.geometry => {
+            debug_assert!(found == shape.path.control_bounds(), "a change to the outline of a node was not recorded in its change stamps (see evolve_engine::revision)");
+            found
+        }
+        _ => {
+            let found = shape.path.control_bounds();
+            cache[slot] = Some((node.revs.geometry, found));
+            found
+        }
+    }
+}
+
+/// Whether a point `local` (in the shape's own space) can be on the shape at all, given the box of its control points: no
+/// when it is farther from the box than the stroke reaches (half its width) and the tolerances (the flattened path is within the
+/// tolerance of the curve) can make up for. Yes whenever that cannot be judged.
+fn could_reach(extent: Option<Rect>, shape: &Shape, local: Vec2, tol: f32) -> bool {
+    let Some(extent) = extent else { return true };
+    let half_width = shape.stroke.as_ref().filter(|s| s.width.is_finite()).map_or(0.0, |s| (s.width * 0.5).max(0.0));
+    let reach = half_width + 2.0 * tol;
+    !reach.is_finite() || extent.expanded(reach).contains(local)
 }
 
 fn default_scene_name() -> String {
@@ -139,6 +210,8 @@ impl Default for Scene {
             clips: Vec::new(),
             ik: Vec::new(),
             next_id: 1,
+            revs: Meta::default(),
+            hits: Meta::default(),
         }
     }
 }
@@ -196,10 +269,10 @@ fn collect_ids(nodes: &[Node], out: &mut Vec<NodeId>) {
 pub(crate) fn node_bounds(scene: &Scene, node: &Node, world: Affine2) -> Option<Rect> {
     if let Some((_, mask, shape)) = node.clip_parts() {
         let mask_world = world * mask.transform;
-        return shape.effective_path(scene, mask_world).transformed(&mask_world).bounds();
+        return shape.effective_path(scene, mask_world).bounds_under(&mask_world);
     }
     match &node.kind {
-        NodeKind::Shape(shape) => shape.effective_path(scene, world).transformed(&world).bounds(),
+        NodeKind::Shape(shape) => shape.effective_path(scene, world).bounds_under(&world),
         NodeKind::Group(children) => children
             .iter()
             .filter_map(|child| node_bounds(scene, child, world * child.transform))
@@ -213,7 +286,7 @@ pub(crate) fn node_bounds(scene: &Scene, node: &Node, world: Affine2) -> Option<
 }
 
 /// Returns true and fills `chain` (outermost first) if `p` hits something inside `nodes`.
-fn hit_in(scene: &Scene, nodes: &[Node], parent_world: Affine2, p: Vec2, tolerance: f32, chain: &mut Vec<NodeId>) -> bool {
+fn hit_in(scene: &Scene, nodes: &[Node], parent_world: Affine2, p: Vec2, tolerance: f32, chain: &mut Vec<NodeId>, mut cache: Option<&mut Boxes>) -> bool {
     for node in nodes.iter().rev() {
         if !node.visible || node.locked {
             continue;
@@ -229,21 +302,28 @@ fn hit_in(scene: &Scene, nodes: &[Node], parent_world: Affine2, p: Vec2, toleran
                 let mask_world = world * mask.transform;
                 let local = mask_world.inverse().transform_point2(p);
                 shape.effective_path(scene, mask_world).contains(local, shape.fill_rule, 0.1 * tolerance)
-                    && hit_in(scene, content, world, p, tolerance, chain)
+                    && hit_in(scene, content, world, p, tolerance, chain, cache.as_deref_mut())
             }
-            NodeKind::Group(children) => hit_in(scene, children, world, p, tolerance, chain),
+            NodeKind::Group(children) => hit_in(scene, children, world, p, tolerance, chain, cache.as_deref_mut()),
             NodeKind::Instance(instance) => scene.symbol(instance.symbol).is_some_and(|symbol| {
                 // The master's inner nodes are not part of the tree, so keep only the instance in the chain.
-                hit_in(scene, std::slice::from_ref(&symbol.root), world, p, tolerance, &mut Vec::new())
+                hit_in(scene, std::slice::from_ref(&symbol.root), world, p, tolerance, &mut Vec::new(), cache.as_deref_mut())
             }),
             NodeKind::Shape(shape) => {
                 let local = world.inverse().transform_point2(p);
                 let tol = tolerance / mean_scale(&world);
-                let path = shape.effective_path(scene, world);
-                let on_fill = shape.fill.is_some() && path.contains(local, shape.fill_rule, tol * 0.5);
-                let on_stroke =
-                    shape.stroke.as_ref().is_some_and(|s| path.distance_to_outline(local, tol * 0.5) <= s.width * 0.5 + tol);
-                on_fill || on_stroke
+                // Most shapes are nowhere near the point: the box of the control points says so without flattening the path (a skinned
+                // shape is bent at draw time, its outline is not the path).
+                let apart = shape.skin.is_none() && cache.as_deref_mut().is_some_and(|boxes| !could_reach(control_box(boxes, node, shape), shape, local, tol));
+                if apart {
+                    false
+                } else {
+                    let path = shape.effective_path(scene, world);
+                    let on_fill = shape.fill.is_some() && path.contains(local, shape.fill_rule, tol * 0.5);
+                    let on_stroke =
+                        shape.stroke.as_ref().is_some_and(|s| path.distance_to_outline(local, tol * 0.5) <= s.width * 0.5 + tol);
+                    on_fill || on_stroke
+                }
             }
             // Only the frame's border is hit, so the objects inside it stay selectable.
             NodeKind::Camera(camera) => CameraView::new(camera, &world).distance_to_border(p) <= tolerance,
@@ -274,6 +354,7 @@ impl Scene {
             script: None,
             transform: Affine2::IDENTITY,
             kind,
+            revs: Meta::default(),
         }
     }
 
@@ -286,12 +367,14 @@ impl Scene {
 
     /// Inserts `node` into `parent` at `index` (clamped). Falls back to the top level if `parent` is not a group.
     pub fn insert(&mut self, node: Node, parent: Option<NodeId>, index: usize) {
+        let parent = parent.filter(|&p| self.find(p).is_some_and(Node::is_group));
         let siblings = match parent.and_then(|p| find_in_mut(&mut self.nodes, p)) {
             Some(Node { kind: NodeKind::Group(children), .. }) => children,
             _ => &mut self.nodes,
         };
         let index = index.min(siblings.len());
         siblings.insert(index, node);
+        self.touch_node(parent, Changes::STRUCTURE);
     }
 
     // --- Queries -------------------------------------------------------------------------------
@@ -300,11 +383,108 @@ impl Scene {
         find_in(&self.nodes, id)
     }
 
-    pub fn find_mut(&mut self, id: NodeId) -> Option<&mut Node> {
-        find_in_mut(&mut self.nodes, id)
+    /// A node for changing. Everything changed through it is recorded; see [`crate::revision`].
+    pub fn find_mut(&mut self, id: NodeId) -> Option<NodeMut<'_>> {
+        let Scene { nodes, revs, .. } = self;
+        find_in_mut(nodes, id).map(|node| NodeMut::new(node, &mut revs.0))
+    }
+
+    /// A shape for changing, as a plain reference, so that a function can hand it around. The node's geometry and paint
+    /// are stamped when this is called, so call it only when about to change the shape. `None` for other kinds of node.
+    pub fn shape_mut(&mut self, id: NodeId) -> Option<&mut Shape> {
+        let Scene { nodes, revs, .. } = self;
+        let node = find_in_mut(nodes, id)?;
+        if !matches!(node.kind, NodeKind::Shape(_)) {
+            return None;
+        }
+        let kinds = Changes::GEOMETRY | Changes::PAINT;
+        let stamp = node.revs.bump(kinds);
+        revs.set(kinds, stamp, Some(id));
+        match &mut node.kind {
+            NodeKind::Shape(shape) => Some(shape),
+            _ => None,
+        }
+    }
+
+    /// What the scene looked like, as stamps, to be compared later with [`Scene::changed_since`]. Equal stamps mean
+    /// equal content, in this scene and in copies of it.
+    pub fn revision(&self) -> Revs {
+        self.revs.0.revs()
+    }
+
+    /// The kinds of change made anywhere in the scene since `before` was taken from [`Scene::revision`]. Empty when
+    /// nothing changed, in constant time.
+    pub fn changed_since(&self, before: &Revs) -> Changes {
+        self.revs.changed_since(before)
+    }
+
+    /// The name of this scene's journal of changes: a copy of the scene has another. Pass it along with a [`Scene::revision`]
+    /// to be able to ask [`Scene::nodes_changed_since`] later.
+    pub fn journal_epoch(&self) -> Stamp {
+        self.revs.epoch()
+    }
+
+    /// Which nodes were changed since `before` (taken from [`Scene::revision`] of this same scene, the same
+    /// [`Scene::journal_epoch`]), and what kinds of change each got. A change that was not to one node (the list of children, the
+    /// symbols) comes as node 0. `None` when the journal does not reach back that far: look at everything then.
+    pub fn nodes_changed_since(&self, before: &Revs) -> Option<Vec<(NodeId, Changes)>> {
+        self.revs.nodes_changed_since(before)
+    }
+
+    /// True if everything that changed since `before` (taken from this scene's [`Scene::revision`] when its journal was named `epoch`)
+    /// was done to cameras: nodes that draw nothing and have no children, so the picture of the scene is what it was. False when
+    /// something else changed, or when the journal cannot say (another scene, a journal that does not reach back that far).
+    pub fn only_cameras_changed_since(&self, before: &Revs, epoch: Stamp) -> bool {
+        if self.journal_epoch() != epoch {
+            return false;
+        }
+        let Some(changed) = self.nodes_changed_since(before) else { return false };
+        changed.iter().all(|&(id, kinds)| {
+            id.0 != 0 && !kinds.intersects(Changes::STRUCTURE) && self.find(id).is_some_and(|node| matches!(node.kind, NodeKind::Camera(_)) && node.children().is_empty())
+        })
+    }
+
+    /// Records a change that was made to the scene as a whole (the list of nodes or symbols, say).
+    pub(crate) fn touch(&mut self, kinds: Changes) {
+        self.revs.bump(kinds, None);
+    }
+
+    /// Records a change to the node `id` itself, made by model code that holds the node without a [`NodeMut`].
+    pub(crate) fn touch_node(&mut self, id: Option<NodeId>, kinds: Changes) {
+        let stamp = self.revs.bump(kinds, id);
+        if let Some(node) = id.and_then(|id| find_in_mut(&mut self.nodes, id)) {
+            node.revs.set(kinds, stamp);
+        }
+    }
+
+    /// True if the two scenes hold the same content, as `==` would say, but without looking at every node when their
+    /// stamps already prove that the nodes and symbols are the same (which is almost always, between two frames).
+    pub fn same_content(&self, other: &Scene) -> bool {
+        if self.revs.revs() != other.revs.revs() {
+            return self == other;
+        }
+        self.name == other.name
+            && self.clips == other.clips
+            && self.ik == other.ik
+            && self.next_id == other.next_id
+            && self.legacy_size == other.legacy_size
+            && self.legacy_background == other.legacy_background
     }
 
     /// All node ids in document order (parents before children, bottom to top).
+    /// Calls `visit` for every node, parents before their children, in document order (the order of [`Scene::all_ids`]).
+    /// Per-frame code that looks at every node should use this and not `all_ids` followed by `find` for each id: that
+    /// searches the tree once per node, and took 400 ms for a scene of 21,000 shapes.
+    pub fn for_each_node<'a>(&'a self, mut visit: impl FnMut(&'a Node)) {
+        fn walk<'a>(nodes: &'a [Node], visit: &mut impl FnMut(&'a Node)) {
+            for node in nodes {
+                visit(node);
+                walk(node.children(), visit);
+            }
+        }
+        walk(&self.nodes, &mut visit);
+    }
+
     pub fn all_ids(&self) -> Vec<NodeId> {
         let mut ids = Vec::new();
         collect_ids(&self.nodes, &mut ids);
@@ -359,16 +539,63 @@ impl Scene {
     /// ancestors, outermost first, ending with the shape.
     pub fn hit_test(&self, p: Vec2, tolerance: f32) -> Option<Vec<NodeId>> {
         let mut chain = Vec::new();
-        hit_in(self, &self.nodes, Affine2::IDENTITY, p, tolerance, &mut chain).then_some(chain)
+        let mut boxes = self.hits.boxes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        hit_in(self, &self.nodes, Affine2::IDENTITY, p, tolerance, &mut chain, Some(&mut boxes)).then_some(chain)
+    }
+
+    /// [`Scene::hit_test`] without the boxes that let it skip far shapes: every shape is tested exactly. The reference for tests.
+    #[cfg(test)]
+    pub(crate) fn hit_test_exact(&self, p: Vec2, tolerance: f32) -> Option<Vec<NodeId>> {
+        let mut chain = Vec::new();
+        hit_in(self, &self.nodes, Affine2::IDENTITY, p, tolerance, &mut chain, None).then_some(chain)
     }
 
     /// Selected ids in document order, without nodes whose ancestor is also selected.
+    /// One walk through the tree, so it stays fast with tens of thousands of selected objects.
     pub fn top_level_selection(&self, ids: &[NodeId]) -> Vec<NodeId> {
-        self.all_ids()
-            .into_iter()
-            .filter(|id| ids.contains(id))
-            .filter(|&id| !ids.iter().any(|&other| other != id && self.is_descendant(other, id)))
-            .collect()
+        fn walk(nodes: &[Node], selected: &HashSet<NodeId>, out: &mut Vec<NodeId>) {
+            for node in nodes {
+                if selected.contains(&node.id) {
+                    out.push(node.id); // everything below it is covered by it
+                } else {
+                    walk(node.children(), selected, out);
+                }
+            }
+        }
+        let selected: HashSet<NodeId> = ids.iter().copied().collect();
+        let mut out = Vec::new();
+        walk(&self.nodes, &selected, &mut out);
+        out
+    }
+
+    /// World-space bounds of the top-level objects among `ids`, in one walk through the tree.
+    pub fn selection_bounds(&self, ids: &[NodeId]) -> Option<Rect> {
+        fn walk(scene: &Scene, nodes: &[Node], parent: Affine2, selected: &HashSet<NodeId>, bounds: &mut Option<Rect>) {
+            for node in nodes {
+                let world = parent * node.transform;
+                if selected.contains(&node.id) {
+                    if let Some(found) = node_bounds(scene, node, world) {
+                        *bounds = Some(bounds.map_or(found, |sum| sum.union(&found)));
+                    }
+                } else {
+                    walk(scene, node.children(), world, selected, bounds);
+                }
+            }
+        }
+        let selected: HashSet<NodeId> = ids.iter().copied().collect();
+        let mut bounds = None;
+        walk(self, &self.nodes, Affine2::IDENTITY, &selected, &mut bounds);
+        bounds
+    }
+
+    /// Drops the ids that are no longer in the scene (after a delete, say).
+    pub fn retain_existing(&self, ids: &mut Vec<NodeId>) {
+        if ids.len() <= 8 {
+            ids.retain(|&id| self.find(id).is_some());
+            return;
+        }
+        let existing: HashSet<NodeId> = self.all_ids().into_iter().collect();
+        ids.retain(|id| existing.contains(id));
     }
 
     // --- Editing -------------------------------------------------------------------------------
@@ -382,7 +609,63 @@ impl Scene {
             },
             None => &mut self.nodes,
         };
-        Some(siblings.remove(index))
+        let node = siblings.remove(index);
+        self.touch_node(parent, Changes::STRUCTURE);
+        Some(node)
+    }
+
+    /// Removes the nodes `ids` name, with what is inside them, in one walk through the tree: the same scene as calling [`Scene::remove`]
+    /// for each, but linear in the size of the scene instead of a search and a shift of the sibling list per node (4,000 of 21,200
+    /// nodes took 1.3 s). Ids that are not in the scene are skipped, and a node inside another listed node goes with it. Returns how
+    /// many nodes were taken out of their parents (not counting those that went with an outer one). Every parent that lost a child is
+    /// stamped `STRUCTURE`, once.
+    pub fn remove_all(&mut self, ids: &[NodeId]) -> usize {
+        self.take_all(ids).len()
+    }
+
+    /// Like [`Scene::remove_all`], but hands the nodes taken out to the caller: those taken out of their parents, level by level (not
+    /// in document order across levels; see `group`, which puts them in order).
+    pub(crate) fn take_all(&mut self, ids: &[NodeId]) -> Vec<Node> {
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        fn take_in(nodes: &mut Vec<Node>, doomed: &HashSet<NodeId>, parent: Option<NodeId>, changed: &mut Vec<Option<NodeId>>, taken: &mut Vec<Node>) {
+            let before = taken.len();
+            taken.extend(nodes.extract_if(.., |node| doomed.contains(&node.id)));
+            if taken.len() > before {
+                changed.push(parent);
+            }
+            for node in nodes.iter_mut() {
+                let id = node.id;
+                if let NodeKind::Group(children) = &mut node.kind {
+                    take_in(children, doomed, Some(id), changed, taken);
+                }
+            }
+        }
+        let doomed: HashSet<NodeId> = ids.iter().copied().collect();
+        let (mut changed, mut taken) = (Vec::new(), Vec::new());
+        take_in(&mut self.nodes, &doomed, None, &mut changed, &mut taken);
+        for parent in changed {
+            self.touch_node(parent, Changes::STRUCTURE);
+        }
+        taken
+    }
+
+    /// The world transform of each of `ids` that is in the scene, found in one walk through the tree.
+    fn worlds_of(&self, ids: &[NodeId]) -> std::collections::HashMap<NodeId, Affine2> {
+        fn walk(nodes: &[Node], parent: Affine2, wanted: &HashSet<NodeId>, found: &mut std::collections::HashMap<NodeId, Affine2>) {
+            for node in nodes {
+                let world = parent * node.transform;
+                if wanted.contains(&node.id) {
+                    found.insert(node.id, world);
+                }
+                walk(node.children(), world, wanted, found);
+            }
+        }
+        let wanted: HashSet<NodeId> = ids.iter().copied().collect();
+        let mut found = std::collections::HashMap::new();
+        walk(&self.nodes, Affine2::IDENTITY, &wanted, &mut found);
+        found
     }
 
     /// Re-parents `id` under `new_parent` at `index` (counted after removal),
@@ -398,6 +681,8 @@ impl Scene {
         let Some(mut node) = self.remove(id) else { return false };
         let target_world = new_parent.and_then(|p| self.world_transform(p)).unwrap_or(Affine2::IDENTITY);
         node.transform = target_world.inverse() * world;
+        node.revs.bump(Changes::TRANSFORM);
+        self.touch(Changes::TRANSFORM);
         self.insert(node, new_parent, index);
         true
     }
@@ -423,6 +708,34 @@ impl Scene {
         let group = self.new_node("Group", NodeKind::Group(Vec::new()));
         let group_id = group.id;
         self.insert(group, parent, index);
+        // Every node keeps its place on the screen: its world transform, found for all of them in one walk (moving them one at a time
+        // searched the tree for each), becomes a transform relative to the group, which is where the first of them was.
+        let worlds = self.worlds_of(&ordered);
+        let group_world = self.world_transform(group_id).unwrap_or(Affine2::IDENTITY);
+        let inverse = group_world.inverse();
+        let position: std::collections::HashMap<NodeId, usize> = ordered.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let mut taken = self.take_all(&ordered);
+        taken.sort_by_key(|node| position[&node.id]);
+        for node in &mut taken {
+            node.transform = inverse * worlds[&node.id];
+            node.revs.bump(Changes::TRANSFORM);
+        }
+        self.touch(Changes::TRANSFORM);
+        if let Some(Node { kind: NodeKind::Group(children), .. }) = find_in_mut(&mut self.nodes, group_id) {
+            *children = taken;
+        }
+        self.touch_node(Some(group_id), Changes::STRUCTURE);
+        Some(group_id)
+    }
+
+    /// [`Scene::group`] by moving the nodes one at a time: the reference for tests.
+    #[cfg(test)]
+    pub(crate) fn group_one_by_one(&mut self, ids: &[NodeId]) -> Option<NodeId> {
+        let ordered = self.top_level_selection(ids);
+        let (parent, index) = self.locate(*ordered.first()?)?;
+        let group = self.new_node("Group", NodeKind::Group(Vec::new()));
+        let group_id = group.id;
+        self.insert(group, parent, index);
         for id in ordered {
             self.move_node(id, Some(group_id), usize::MAX);
         }
@@ -438,6 +751,8 @@ impl Scene {
         let mut freed = Vec::new();
         for (offset, mut child) in children.into_iter().enumerate() {
             child.transform = transform * child.transform;
+            child.revs.bump(Changes::TRANSFORM);
+            self.touch(Changes::TRANSFORM);
             freed.push(child.id);
             self.insert(child, parent, index + offset);
         }
@@ -481,9 +796,11 @@ impl Scene {
         for &id in others {
             self.remove(id);
         }
-        if let Some(Node { kind: NodeKind::Shape(shape), .. }) = self.find_mut(target) {
-            shape.path.subpaths.extend(merged);
-            shape.fill_rule = FillRule::EvenOdd;
+        if let Some(mut node) = self.find_mut(target) {
+            if let NodeKind::Shape(shape) = &mut node.kind {
+                shape.path.subpaths.extend(merged);
+                shape.fill_rule = FillRule::EvenOdd;
+            }
         }
         Some(target)
     }
@@ -508,9 +825,11 @@ impl Scene {
         for &id in others {
             self.remove(id);
         }
-        if let Some(Node { kind: NodeKind::Shape(shape), .. }) = self.find_mut(target) {
-            shape.path = result;
-            shape.fill_rule = FillRule::EvenOdd;
+        if let Some(mut node) = self.find_mut(target) {
+            if let NodeKind::Shape(shape) = &mut node.kind {
+                shape.path = result;
+                shape.fill_rule = FillRule::EvenOdd;
+            }
         }
         Some(target)
     }
@@ -530,11 +849,14 @@ impl Scene {
             if let NodeKind::Shape(s) = &mut copy.kind {
                 s.path.subpaths = vec![sub.clone()];
             }
+            copy.revs.bump(Changes::GEOMETRY);
             released.push(copy.id);
             self.insert(copy, parent, index + offset);
         }
-        if let Some(Node { kind: NodeKind::Shape(s), .. }) = self.find_mut(id) {
-            s.path.subpaths.truncate(1);
+        if let Some(mut node) = self.find_mut(id) {
+            if let NodeKind::Shape(s) = &mut node.kind {
+                s.path.subpaths.truncate(1);
+            }
         }
         released
     }
@@ -547,7 +869,7 @@ impl Scene {
         let to_local = world.inverse();
         let center = to_local.transform_point2(world_center);
         let shift = Affine2::from_translation(-center);
-        let Some(node) = self.find_mut(id) else { return false };
+        let Some(mut node) = self.find_mut(id) else { return false };
         match &mut node.kind {
             // A skin is bound to the outline's current coordinates, so skinned shapes keep their origin.
             NodeKind::Shape(shape) if shape.skin.is_some() => return false,
@@ -561,7 +883,10 @@ impl Scene {
                     }
                 }
             }
-            NodeKind::Group(children) => children.iter_mut().for_each(|c| c.transform = shift * c.transform),
+            NodeKind::Group(children) => children.iter_mut().for_each(|c| {
+                c.transform = shift * c.transform;
+                c.revs.bump(Changes::TRANSFORM);
+            }),
             NodeKind::Instance(_) | NodeKind::Camera(_) => return false,
         }
         node.transform *= Affine2::from_translation(center);
@@ -577,7 +902,7 @@ impl Scene {
             return None;
         }
         let group = self.group(ids)?;
-        let node = self.find_mut(group)?;
+        let mut node = self.find_mut(group)?;
         node.clip = true;
         node.name = "Clip Group".into();
         Some(group)
@@ -599,6 +924,93 @@ mod tests {
         let mut node = scene.new_node("square", NodeKind::Shape(Shape::new(Path::rect(Vec2::ZERO, Vec2::splat(10.0)))));
         node.transform = Affine2::from_translation(at);
         scene.add(node, None)
+    }
+
+    /// The definition `top_level_selection` replaced, which took cubic time: a node is dropped
+    /// when any other selected node is its ancestor.
+    fn top_level_selection_by_definition(scene: &Scene, ids: &[NodeId]) -> Vec<NodeId> {
+        scene
+            .all_ids()
+            .into_iter()
+            .filter(|id| ids.contains(id))
+            .filter(|&id| !ids.iter().any(|&other| other != id && scene.is_descendant(other, id)))
+            .collect()
+    }
+
+    /// A random tree of groups and moved, scaled shapes, plus a random generator for picking from it.
+    fn random_scene(round: usize, random: &mut impl FnMut(usize) -> usize) -> Scene {
+        let mut scene = Scene::default();
+        let mut groups: Vec<Option<NodeId>> = vec![None];
+        for _ in 0..(10 + round * 3) {
+            let parent = groups[random(groups.len())];
+            let make_group = random(3) == 0;
+            let kind = if make_group { NodeKind::Group(Vec::new()) } else { NodeKind::Shape(Shape::new(Path::rect(Vec2::ZERO, Vec2::splat(5.0 + random(10) as f32)))) };
+            let mut node = scene.new_node("n", kind);
+            node.transform = Affine2::from_scale_angle_translation(Vec2::splat(0.5 + random(4) as f32 * 0.5), random(7) as f32 * 0.3, Vec2::new(random(200) as f32, random(200) as f32));
+            let id = scene.add(node, parent);
+            if make_group {
+                groups.push(Some(id));
+            }
+        }
+        scene
+    }
+
+    fn random_selection(all: &[NodeId], random: &mut impl FnMut(usize) -> usize) -> Vec<NodeId> {
+        // In random order, with repeated ids and one id that is not in the scene.
+        let mut ids: Vec<NodeId> = (0..random(all.len() + 1)).map(|_| all[random(all.len())]).collect();
+        ids.push(NodeId(u64::MAX));
+        ids
+    }
+
+    fn generator() -> impl FnMut(usize) -> usize {
+        let mut seed = 99_u32;
+        move |below| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as usize % below
+        }
+    }
+
+    #[test]
+    fn top_level_selection_matches_its_definition_on_random_trees() {
+        let mut random = generator();
+        for round in 0..30 {
+            let scene = random_scene(round, &mut random);
+            let all = scene.all_ids();
+            for _ in 0..20 {
+                let ids = random_selection(&all, &mut random);
+                assert_eq!(scene.top_level_selection(&ids), top_level_selection_by_definition(&scene, &ids), "round {round}, selection {ids:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn visiting_every_node_goes_in_the_order_of_all_ids_on_random_trees() {
+        let mut random = generator();
+        for round in 0..30 {
+            let scene = random_scene(round, &mut random);
+            let mut visited = Vec::new();
+            scene.for_each_node(|node| visited.push(node.id));
+            assert_eq!(visited, scene.all_ids(), "round {round}");
+        }
+    }
+
+    #[test]
+    fn selection_bounds_and_pruning_match_the_one_by_one_versions_on_random_trees() {
+        let mut random = generator();
+        for round in 0..30 {
+            let scene = random_scene(round, &mut random);
+            let all = scene.all_ids();
+            for _ in 0..20 {
+                let ids = random_selection(&all, &mut random);
+                let one_by_one = top_level_selection_by_definition(&scene, &ids).into_iter().filter_map(|id| scene.world_bounds(id)).reduce(|a, b| a.union(&b));
+                assert_eq!(scene.selection_bounds(&ids), one_by_one, "round {round}, selection {ids:?}");
+
+                let mut pruned = ids.clone();
+                scene.retain_existing(&mut pruned);
+                let expected: Vec<NodeId> = ids.iter().copied().filter(|&id| scene.find(id).is_some()).collect();
+                assert_eq!(pruned, expected, "round {round}");
+            }
+        }
     }
 
     #[test]

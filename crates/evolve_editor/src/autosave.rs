@@ -17,12 +17,17 @@ pub struct Recovery {
 
 /// Where recovery files live: the user's local data folder, or the temp folder.
 pub fn default_dir() -> PathBuf {
-    ["LOCALAPPDATA", "XDG_DATA_HOME"]
-        .into_iter()
-        .find_map(std::env::var_os)
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("EvolveEngine")
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    data_root(var("LOCALAPPDATA"), var("XDG_DATA_HOME"), var("HOME")).unwrap_or_else(std::env::temp_dir).join("EvolveEngine")
+}
+
+/// The per-user data folder: `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS,
+/// `$XDG_DATA_HOME` or `~/.local/share` on Linux.
+fn data_root(local_app_data: Option<PathBuf>, xdg_data_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    local_app_data.or(xdg_data_home).or_else(|| {
+        let home = home?;
+        Some(if cfg!(target_os = "macos") { home.join("Library/Application Support") } else { home.join(".local/share") })
+    })
 }
 
 pub fn write_in(dir: &Path, project: &Project, original: Option<&Path>) -> io::Result<()> {
@@ -62,6 +67,17 @@ mod tests {
     use super::*;
     use evolve_engine::geometry::Vec2;
     use evolve_engine::scene::Scene;
+
+    #[test]
+    fn the_data_folder_follows_each_platform_convention() {
+        let p = |s: &str| Some(PathBuf::from(s));
+        assert_eq!(data_root(p("/win"), p("/xdg"), p("/home/a")), p("/win"));
+        assert_eq!(data_root(None, p("/xdg"), p("/home/a")), p("/xdg"));
+        let from_home = data_root(None, None, p("/home/a")).unwrap();
+        let expected = if cfg!(target_os = "macos") { "/home/a/Library/Application Support" } else { "/home/a/.local/share" };
+        assert_eq!(from_home, PathBuf::from(expected));
+        assert_eq!(data_root(None, None, None), None, "nothing known: the caller falls back to the temp folder");
+    }
 
     #[test]
     fn a_recovery_copy_round_trips_and_can_be_cleared() {

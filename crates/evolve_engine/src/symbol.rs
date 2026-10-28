@@ -4,6 +4,7 @@
 //! the fill and stroke color of everything inside the master.
 
 use crate::geometry::{Affine2, Rect, Vec2};
+use crate::revision::Changes;
 use crate::scene::{self, Node, NodeId, NodeKind, Scene, Shape};
 use crate::style::{Color, Paint, Stroke};
 use serde::{Deserialize, Serialize};
@@ -75,15 +76,18 @@ fn apply_overrides(node: &mut Node, overrides: Overrides) {
         NodeKind::Shape(shape) => {
             if let (Some(paint), Some(color)) = (&mut shape.fill, overrides.fill) {
                 *paint = Paint::Solid(color);
+                node.revs.bump(Changes::PAINT);
             }
             if let (Some(stroke), Some(color)) = (&mut shape.stroke, overrides.stroke) {
                 stroke.paint = Paint::Solid(color);
+                node.revs.bump(Changes::PAINT);
             }
         }
         NodeKind::Group(children) => children.iter_mut().for_each(|c| apply_overrides(c, overrides)),
         NodeKind::Instance(instance) => {
             instance.fill = overrides.fill.or(instance.fill);
             instance.stroke = overrides.stroke.or(instance.stroke);
+            node.revs.bump(Changes::PAINT);
         }
         NodeKind::Camera(_) => {}
     }
@@ -150,6 +154,7 @@ impl Scene {
         let id = SymbolId(self.next_id);
         self.next_id += 1;
         self.symbols.push(Symbol { id, name: name.to_string(), root });
+        self.touch(Changes::STRUCTURE);
         let instance = self.replace_with_instance(&ordered, id, center)?;
         Some((id, instance))
     }
@@ -167,6 +172,7 @@ impl Scene {
         }
         let (root, center) = self.bake_root(&ordered)?;
         self.symbols.iter_mut().find(|s| s.id == symbol)?.root = root;
+        self.touch(Changes::STRUCTURE);
         self.replace_with_instance(&ordered, symbol, center)
     }
 
@@ -184,6 +190,7 @@ impl Scene {
         let (root, name) = (source.root.clone(), source.name.clone());
         let mut copy = self.clone_with_new_ids(root);
         copy.name = name;
+        copy.revs.bump(Changes::DATA);
         Some(copy)
     }
 
@@ -198,10 +205,21 @@ impl Scene {
         let mut copy = self.symbol_copy(symbol)?;
         apply_overrides(&mut copy, overrides);
         (copy.name, copy.transform, copy.opacity) = (name, transform, opacity);
+        copy.revs.bump(Changes::TRANSFORM | Changes::PAINT | Changes::DATA);
         let copy_id = copy.id;
         self.remove(id);
         self.insert(copy, parent, index);
         Some(copy_id)
+    }
+
+    /// Renames a symbol. Stamps `DATA`. Returns false if there is no such symbol.
+    pub fn rename_symbol(&mut self, id: SymbolId, name: &str) -> bool {
+        let Some(symbol) = self.symbols.iter_mut().find(|s| s.id == id) else { return false };
+        if symbol.name != name {
+            symbol.name = name.to_string();
+            self.touch(Changes::DATA);
+        }
+        true
     }
 
     /// Removes an unused symbol. Returns false if it is still placed somewhere.
@@ -210,6 +228,7 @@ impl Scene {
             return false;
         }
         self.symbols.retain(|s| s.id != id);
+        self.touch(Changes::STRUCTURE);
         true
     }
 
@@ -221,6 +240,7 @@ impl Scene {
         for &id in ordered {
             let mut node = self.find(id)?.clone();
             node.transform = Affine2::from_translation(-center) * self.world_transform(id)?;
+            node.revs.bump(Changes::TRANSFORM);
             children.push(node);
         }
         Some((self.new_node("Symbol", NodeKind::Group(children)), center))
@@ -279,8 +299,10 @@ mod tests {
         let mut scene = Scene::default();
         let a = square(&mut scene, Vec2::ZERO);
         let (symbol, instance) = scene.make_symbol(&[a], "Box").unwrap();
-        if let Some(Node { kind: NodeKind::Instance(i), .. }) = scene.find_mut(instance) {
-            i.fill = Some(Color::rgb(255, 0, 0));
+        if let Some(mut node) = scene.find_mut(instance) {
+            if let NodeKind::Instance(i) = &mut node.kind {
+                i.fill = Some(Color::rgb(255, 0, 0));
+            }
         }
         let group = scene.detach_instance(instance).unwrap();
         assert_eq!(scene.symbol_usage(symbol), 0);

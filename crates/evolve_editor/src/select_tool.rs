@@ -25,11 +25,7 @@ const ROTATE_HANDLE_DISTANCE: f32 = 26.0;
 impl EditorApp {
     /// World-space bounds of everything selected.
     pub fn selection_bounds(&self) -> Option<Rect> {
-        self.scene
-            .top_level_selection(&self.selection)
-            .into_iter()
-            .filter_map(|id| self.scene.world_bounds(id))
-            .reduce(|a, b| a.union(&b))
+        self.scene.selection_bounds(&self.selection)
     }
 
     /// True if a camera is selected (cameras move and turn, but are resized in the Inspector).
@@ -75,8 +71,8 @@ impl EditorApp {
     pub fn apply_world_delta(&mut self, items: &[(NodeId, Affine2)], delta: Affine2) {
         for &(id, start_world) in items {
             let parent_inverse = self.scene.parent_world(id).inverse();
-            if let Some(node) = self.scene.find_mut(id) {
-                node.transform = parent_inverse * delta * start_world;
+            if let Some(mut node) = self.scene.find_mut(id) {
+                node.set_transform(parent_inverse * delta * start_world);
             }
         }
     }

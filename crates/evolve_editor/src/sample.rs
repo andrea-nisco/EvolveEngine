@@ -154,7 +154,7 @@ pub fn scene() -> Scene {
         stars.push(first);
         for (x, y, scale, fill) in [(640.0, 130.0, 0.7, Color::rgb(120, 200, 255)), (980.0, 220.0, 0.45, Color::rgb(255, 120, 160))] {
             if let Some(id) = scene.place_instance(symbol, Vec2::new(x, y)) {
-                if let Some(node) = scene.find_mut(id) {
+                if let Some(mut node) = scene.find_mut(id) {
                     node.transform = Affine2::from_translation(Vec2::new(x, y)) * Affine2::from_scale(Vec2::splat(scale));
                     if let NodeKind::Instance(instance) = &mut node.kind {
                         instance.fill = Some(fill);
@@ -172,14 +172,14 @@ pub fn scene() -> Scene {
 }
 
 fn set_body(scene: &mut Scene, id: NodeId, kind: BodyKind) {
-    if let Some(node) = scene.find_mut(id) {
-        node.body = Some(Body::new(kind));
+    if let Some(mut node) = scene.find_mut(id) {
+        node.set_body(Some(Body::new(kind)));
     }
 }
 
 fn set_script(scene: &mut Scene, id: NodeId, source: &str) {
-    if let Some(node) = scene.find_mut(id) {
-        node.script = Some(source.to_string());
+    if let Some(mut node) = scene.find_mut(id) {
+        node.set_script(Some(source.to_string()));
     }
 }
 

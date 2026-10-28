@@ -143,8 +143,16 @@ impl Scene {
         self.find(id).is_some_and(|n| n.bone.is_some())
     }
 
+    /// Every bone, in document order. One walk over the tree: the editor asks for this on every frame, and looking each
+    /// node up by its id (as this used to) made it quadratic, 400 ms for a scene of 21,000 shapes.
     pub fn bone_ids(&self) -> Vec<NodeId> {
-        self.all_ids().into_iter().filter(|&id| self.is_bone(id)).collect()
+        let mut ids = Vec::new();
+        self.for_each_node(|node| {
+            if node.bone.is_some() {
+                ids.push(node.id);
+            }
+        });
+        ids
     }
 
     /// World positions of a bone's origin and tip.
@@ -169,10 +177,13 @@ impl Scene {
     /// Places a bone by its world origin and direction, optionally changing its length.
     pub fn set_bone_world(&mut self, id: NodeId, origin: Vec2, angle: f32, length: Option<f32>) {
         let parent_inverse = self.parent_world(id).inverse();
-        if let Some(node) = self.find_mut(id) {
-            node.transform = parent_inverse * Affine2::from_angle_translation(angle, origin);
-            if let (Some(bone), Some(length)) = (node.bone.as_mut(), length) {
-                bone.length = length.max(1e-3);
+        if let Some(mut node) = self.find_mut(id) {
+            node.set_transform(parent_inverse * Affine2::from_angle_translation(angle, origin));
+            // Asking for the bone to change it counts as a change, so only do it when a length was given.
+            if let Some(length) = length {
+                if let Some(bone) = node.bone_mut() {
+                    bone.length = length.max(1e-3);
+                }
             }
         }
     }
@@ -232,8 +243,8 @@ impl Scene {
                     }
                     let Some(world) = self.world_transform(bone) else { continue };
                     let parent_inverse = self.parent_world(bone).inverse();
-                    if let Some(node) = self.find_mut(bone) {
-                        node.transform = parent_inverse * rotate_around(to_tip.angle_to(to_target), origin) * world;
+                    if let Some(mut node) = self.find_mut(bone) {
+                        node.set_transform(parent_inverse * rotate_around(to_tip.angle_to(to_target), origin) * world);
                     }
                 }
             }
@@ -244,8 +255,8 @@ impl Scene {
     pub fn copy_ik_bones_to(&self, other: &mut Scene) {
         for ik in &self.ik {
             for bone in self.ik_chain(ik) {
-                if let (Some(from), Some(to)) = (self.find(bone), other.find_mut(bone)) {
-                    to.transform = from.transform;
+                if let (Some(from), Some(mut to)) = (self.find(bone), other.find_mut(bone)) {
+                    to.set_transform(from.transform);
                 }
             }
         }
@@ -263,7 +274,8 @@ impl Scene {
         if segments.len() != bones.len() || inverse_bind.len() != bones.len() {
             return false;
         }
-        let Some(Node { kind: NodeKind::Shape(s), .. }) = self.find_mut(shape) else { return false };
+        let Some(mut node) = self.find_mut(shape) else { return false };
+        let NodeKind::Shape(s) = &mut node.kind else { return false };
         let weights = s
             .path
             .subpaths
@@ -276,8 +288,9 @@ impl Scene {
 
     /// Removes the skin; the shape goes back to its bind pose.
     pub fn unbind_skin(&mut self, shape: NodeId) -> bool {
-        match self.find_mut(shape).map(|n| &mut n.kind) {
-            Some(NodeKind::Shape(s)) => s.skin.take().is_some(),
+        let Some(mut node) = self.find_mut(shape) else { return false };
+        match &mut node.kind {
+            NodeKind::Shape(s) => s.skin.take().is_some(),
             _ => false,
         }
     }
@@ -298,9 +311,8 @@ impl Scene {
                 }
             }
         }
-        let Some(Node { kind: NodeKind::Shape(Shape { skin: Some(skin), .. }), .. }) = self.find_mut(shape) else {
-            return false;
-        };
+        let Some(mut node) = self.find_mut(shape) else { return false };
+        let NodeKind::Shape(Shape { skin: Some(skin), .. }) = &mut node.kind else { return false };
         for (si, ai, falloff) in hits {
             paint_weight(&mut skin.weights[si][ai], bone_index, amount * falloff);
         }
@@ -322,6 +334,35 @@ mod tests {
         let mut node = scene.new_node("target", NodeKind::Group(Vec::new()));
         node.transform = Affine2::from_translation(at);
         scene.add(node, None)
+    }
+
+    #[test]
+    fn the_bones_come_in_document_order_wherever_they_sit_in_the_tree() {
+        let mut scene = Scene::default();
+        let plain = target(&mut scene, Vec2::ZERO);
+        let first = scene.add_bone(None, Vec2::ZERO, 0.0, 10.0);
+        let child = scene.add_bone(Some(first), Vec2::ZERO, 0.0, 10.0);
+        let node = scene.new_node("group", NodeKind::Group(Vec::new()));
+        let group = scene.add(node, None);
+        let inside = scene.new_node("inside", NodeKind::Group(Vec::new()));
+        scene.add(inside, Some(group));
+        let last = scene.add_bone(None, Vec2::ZERO, 0.0, 10.0);
+        assert_eq!(scene.bone_ids(), vec![first, child, last]);
+        assert!(!scene.bone_ids().contains(&plain));
+        assert_eq!(scene.bone_ids().len(), scene.all_ids().into_iter().filter(|&id| scene.is_bone(id)).count());
+    }
+
+    #[test]
+    fn asking_for_the_bones_of_a_big_scene_is_quick() {
+        // The editor asks on every frame. Looking every node up by its id made this take 400 ms for 21,000 shapes.
+        let mut scene = Scene::default();
+        for i in 0..21_000 {
+            let node = scene.new_node(format!("s{i}"), NodeKind::Group(Vec::new()));
+            scene.add(node, None);
+        }
+        let started = std::time::Instant::now();
+        assert!(scene.bone_ids().is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_millis(50), "took {:?}", started.elapsed());
     }
 
     #[test]

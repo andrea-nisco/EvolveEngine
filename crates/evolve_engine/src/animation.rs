@@ -326,25 +326,25 @@ impl Scene {
     /// Writes a pose into the nodes (so the animated state can be edited and saved).
     pub fn apply_pose(&mut self, pose: &Pose) {
         for (&id, p) in pose {
-            let Some(node) = self.find_mut(id) else { continue };
+            // Only what the pose really sets is stamped, so a pose that moves things does not make a renderer
+            // rebuild their shapes.
+            let Some(mut node) = self.find_mut(id) else { continue };
             if let Some(transform) = p.transform {
-                node.transform = transform;
+                node.set_transform(transform);
             }
             if let Some(opacity) = p.opacity {
-                node.opacity = opacity;
+                node.set_opacity(opacity);
             }
-            if let NodeKind::Shape(shape) = &mut node.kind {
-                if let (Some(path), None) = (&p.path, &shape.skin) {
-                    shape.path = path.clone();
+            if let (Some(path), true) = (&p.path, matches!(&node.kind, NodeKind::Shape(shape) if shape.skin.is_none())) {
+                if let Some(target) = node.path_mut() {
+                    *target = path.clone();
                 }
-                if let (Some(color), Some(Paint::Solid(c))) = (p.fill, shape.fill.as_mut()) {
-                    *c = color;
-                }
-                if let (Some(color), Some(stroke)) = (p.stroke, shape.stroke.as_mut()) {
-                    if matches!(stroke.paint, Paint::Solid(_)) {
-                        stroke.paint = Paint::Solid(color);
-                    }
-                }
+            }
+            if let Some(color) = p.fill {
+                node.set_solid_fill_color(color);
+            }
+            if let Some(color) = p.stroke {
+                node.set_solid_stroke_color(color);
             }
         }
     }
@@ -471,8 +471,10 @@ mod tests {
     #[test]
     fn gradient_fills_are_not_animatable() {
         let (mut scene, id) = scene_with_square();
-        if let Some(Node { kind: NodeKind::Shape(shape), .. }) = scene.find_mut(id) {
-            shape.fill = Some(Paint::linear(Vec2::ZERO, Vec2::X, Color::BLACK, Color::WHITE));
+        if let Some(mut node) = scene.find_mut(id) {
+            if let NodeKind::Shape(shape) = &mut node.kind {
+                shape.fill = Some(Paint::linear(Vec2::ZERO, Vec2::X, Color::BLACK, Color::WHITE));
+            }
         }
         assert_eq!(Property::Fill.read(scene.find(id).unwrap()), None);
     }

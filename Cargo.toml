@@ -1,6 +1,6 @@
 ﻿[workspace]
 resolver = "2"
-members = ["crates/evolve_engine", "crates/evolve_editor", "crates/evolve_player"]
+members = ["crates/evolve_engine", "crates/evolve_editor", "crates/evolve_player", "crates/evolve_gpu", "tools/web-canary"]
 
 # Used only for the browser player (tools/build-web-player.ps1): smaller download, same code.
 [profile.web]

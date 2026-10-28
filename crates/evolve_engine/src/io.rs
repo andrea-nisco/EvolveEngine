@@ -13,7 +13,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Version 2 added the camera object, version 3 several scenes per project. Older files are
 /// upgraded when they are loaded: a version 1 or 2 file becomes a project with one scene.
-const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct ProjectFile {
@@ -30,6 +30,11 @@ struct ProjectFile {
     scene: Option<Scene>,
 }
 
+/// Projects up to this size (in bytes of compact JSON) are written indented, so small files stay easy to read
+/// and to compare. Bigger ones are written on a single line: indenting a map of 21,000 shapes made it 382 MB instead
+/// of about a tenth of that. Both are the same JSON.
+const INDENT_LIMIT: usize = 1 << 20;
+
 /// The project as JSON text (the `.evolve` file format).
 pub fn project_to_string(project: &Project) -> Result<String> {
     let file = ProjectFile {
@@ -39,6 +44,10 @@ pub fn project_to_string(project: &Project) -> Result<String> {
         start: project.start,
         scene: None,
     };
+    let compact = serde_json::to_string(&file)?;
+    if compact.len() > INDENT_LIMIT {
+        return Ok(compact);
+    }
     Ok(serde_json::to_string_pretty(&file)?)
 }
 
@@ -237,6 +246,25 @@ fn convert_stroke(stroke: &usvg::Stroke) -> Option<Stroke> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn small_projects_are_indented_and_big_ones_are_not_and_both_read_back_the_same() {
+        let small = Project::new();
+        let text = project_to_string(&small).unwrap();
+        assert!(text.lines().count() > 10, "a small project stays easy to read");
+        assert_eq!(parse_project(&text).unwrap(), small);
+
+        // About 40 000 anchors is several megabytes of JSON, well past the limit.
+        let anchors = (0..40_000).map(|i| Anchor::corner(Vec2::new(i as f32 * 0.25, (i % 97) as f32))).collect();
+        let mut big = Project::new();
+        let shape = Shape::new(Path { subpaths: vec![SubPath { anchors, closed: false }] });
+        let node = big.scenes[0].new_node("long line", NodeKind::Shape(shape));
+        big.scenes[0].add(node, None);
+        let text = project_to_string(&big).unwrap();
+        assert!(text.len() > INDENT_LIMIT);
+        assert_eq!(text.lines().count(), 1, "a big project is written on one line");
+        assert_eq!(parse_project(&text).unwrap(), big);
+    }
+
     /// A project as an older version wrote it: one scene under `scene`.
     fn as_old_file(project: &Project, version: u32) -> String {
         let mut json: serde_json::Value = serde_json::from_str(&project_to_string(project).unwrap()).unwrap();
@@ -326,5 +354,54 @@ mod tests {
         assert!(matches!(shape.fill, Some(Paint::Gradient(_))));
         assert!(shape.stroke.is_some());
         assert!(!shape.path.subpaths.is_empty());
+    }
+
+    /// What the importer does today with SVG features the engine does not have (OPEN_POINTS.md, P10). It never fails;
+    /// it flattens or drops them without telling the user. If the importer learns one of these, this test changes with it.
+    #[test]
+    fn svg_features_the_engine_lacks_are_flattened_or_dropped_without_failing() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="400" height="300">
+  <defs>
+    <clipPath id="cp"><circle cx="50" cy="50" r="20"/></clipPath>
+    <mask id="mk"><rect width="400" height="300" fill="white"/></mask>
+    <filter id="blur"><feGaussianBlur stdDeviation="5"/></filter>
+    <pattern id="pat" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="red"/></pattern>
+    <radialGradient id="rg" cx="0.5" cy="0.5" r="0.5" fx="0.2" fy="0.2" spreadMethod="reflect"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></radialGradient>
+  </defs>
+  <rect id="dashed" width="30" height="30" fill="none" stroke="black" stroke-width="3" stroke-dasharray="4 2"/>
+  <g id="clipped" clip-path="url(#cp)"><rect id="insideclip" x="30" y="30" width="80" height="80" fill="orange"/></g>
+  <g id="masked" mask="url(#mk)"><rect id="insidemask" width="80" height="80" fill="purple"/></g>
+  <g id="blurred" filter="url(#blur)"><rect id="insideblur" width="30" height="30" fill="teal"/></g>
+  <rect id="patterned" width="30" height="30" fill="url(#pat)"/>
+  <rect id="focal" width="30" height="30" fill="url(#rg)"/>
+  <g id="blend" style="mix-blend-mode:multiply"><rect id="insideblend" width="30" height="30" fill="gray"/></g>
+  <text id="label" x="10" y="200" font-size="20">Hello</text>
+  <image id="photo" x="200" y="200" width="20" height="20" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="/>
+</svg>"##;
+        let mut scene = Scene::default();
+        let root = import_svg(&mut scene, svg, "svg").expect("importing never fails because of an unsupported feature");
+        let shape = |name: &str| match &scene.find(scene.find_by_name(name).unwrap_or_else(|| panic!("{name} was imported"))).unwrap().kind {
+            NodeKind::Shape(shape) => shape.clone(),
+            _ => panic!("{name} is not a shape"),
+        };
+
+        // A dashed outline becomes a solid one: the picture changes.
+        assert_eq!(shape("dashed").stroke.map(|s| s.width), Some(3.0));
+        // Clip paths, masks, filters and blend modes are ignored: the content arrives whole, unclipped, unmasked, sharp.
+        for (group, inside) in [("clipped", "insideclip"), ("masked", "insidemask"), ("blurred", "insideblur"), ("blend", "insideblend")] {
+            let group = scene.find(scene.find_by_name(group).unwrap()).unwrap();
+            assert!(!group.clip && group.opacity == 1.0, "{} carries no trace of the effect", group.name);
+            assert_eq!(group.children().len(), 1);
+            assert_eq!(group.children()[0].name, inside);
+        }
+        // A pattern fill leaves a shape with no fill and no stroke: it becomes invisible.
+        let patterned = shape("patterned");
+        assert!(patterned.fill.is_none() && patterned.stroke.is_none());
+        // A gradient's focal point and spread method are lost: it is a plain radial gradient that pads.
+        assert!(matches!(shape("focal").fill, Some(Paint::Gradient(Gradient { kind: GradientKind::Radial { .. }, .. }))));
+        // Text (no fonts are loaded) and images leave nothing behind.
+        assert!(scene.find_by_name("label").is_none(), "text is dropped");
+        assert!(scene.find(scene.find_by_name("photo").unwrap()).unwrap().children().is_empty(), "an image leaves an empty group");
+        let _ = root;
     }
 }

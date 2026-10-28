@@ -3,7 +3,7 @@
 //! Everything is rasterized straight from the Bézier data at the requested resolution,
 //! so output stays sharp at any zoom level.
 
-use crate::geometry::Affine2;
+use crate::geometry::{Affine2, Rect, Vec2};
 use crate::path::Path;
 use crate::scene::{Node, NodeKind, Scene, Shape};
 use crate::style::{self, Color, FillRule, GradientKind, LineCap, LineJoin, Paint};
@@ -24,7 +24,13 @@ pub fn render(scene: &Scene, view: Affine2, target: &mut sk::Pixmap) {
 
 /// Draws the visible nodes only, without the camera's background color.
 pub fn render_content(scene: &Scene, view: Affine2, target: &mut sk::Pixmap) {
-    let ctx = Ctx { scene, overrides: Overrides::default(), view };
+    render_nodes(scene, view, target, true);
+}
+
+/// Draws the visible nodes. With `cull` off, shapes outside the target are processed anyway
+/// (the picture is the same; this exists so tests and benchmarks can compare).
+pub fn render_nodes(scene: &Scene, view: Affine2, target: &mut sk::Pixmap, cull: bool) {
+    let ctx = Ctx { scene, overrides: Overrides::default(), view, cull };
     for node in &scene.nodes {
         draw_node(&ctx, node, view, target);
     }
@@ -39,7 +45,7 @@ pub fn thumbnail(scene: &Scene, symbol: &Symbol, size: u32) -> Option<sk::Pixmap
         * Affine2::from_scale(crate::geometry::Vec2::splat(scale))
         * Affine2::from_translation(-bounds.center());
     let mut pixmap = sk::Pixmap::new(size, size)?;
-    draw_node(&Ctx { scene, overrides: Overrides::default(), view }, &symbol.root, view, &mut pixmap);
+    draw_node(&Ctx { scene, overrides: Overrides::default(), view, cull: true }, &symbol.root, view, &mut pixmap);
     Some(pixmap)
 }
 
@@ -50,6 +56,8 @@ struct Ctx<'a> {
     scene: &'a Scene,
     overrides: Overrides,
     view: Affine2,
+    /// Skip shapes (and layers) that cannot reach the target.
+    cull: bool,
 }
 
 impl Ctx<'_> {
@@ -70,6 +78,9 @@ fn draw_node(ctx: &Ctx, node: &Node, parent: Affine2, target: &mut sk::Pixmap) {
         return;
     }
     // Partial opacity applies to the node as a whole, so draw it on its own layer first.
+    if ctx.cull && !may_touch(node, world, target) {
+        return;
+    }
     let Some(mut layer) = sk::Pixmap::new(target.width(), target.height()) else { return };
     draw_content(ctx, node, world, &mut layer);
     let paint = sk::PixmapPaint { opacity: node.opacity, ..Default::default() };
@@ -105,6 +116,10 @@ fn draw_clipped(
 ) {
     let (w, h) = (target.width(), target.height());
     let mask_world = world * mask_node.transform;
+    // Content only shows through the mask, so a mask outside the target means nothing to draw.
+    if ctx.cull && !shape_may_touch(mask_shape, &mask_world, target) {
+        return;
+    }
     let mask_path = mask_shape.effective_path(ctx.scene, ctx.scene_world(mask_world));
     let (Some(mut layer), Some(mut mask), Some(path)) = (sk::Pixmap::new(w, h), sk::Mask::new(w, h), to_skia_path(&mask_path))
     else {
@@ -120,6 +135,9 @@ fn draw_clipped(
 }
 
 fn draw_shape(ctx: &Ctx, shape: &Shape, world: Affine2, target: &mut sk::Pixmap) {
+    if ctx.cull && !shape_may_touch(shape, &world, target) {
+        return;
+    }
     let Some(path) = to_skia_path(&shape.effective_path(ctx.scene, ctx.scene_world(world))) else { return };
     let transform = to_skia_transform(&world);
 
@@ -138,6 +156,52 @@ fn draw_shape(ctx: &Ctx, shape: &Shape, world: Affine2, target: &mut sk::Pixmap)
             target.stroke_path(&path, &paint, &to_skia_stroke(stroke), transform, None);
         }
     }
+}
+
+// --- Culling ---------------------------------------------------------------------------------
+
+/// False only if nothing of `node` (and its children) can land on the target. `world` maps to pixels.
+fn may_touch(node: &Node, world: Affine2, target: &sk::Pixmap) -> bool {
+    if !node.visible || node.opacity <= 0.0 {
+        return false;
+    }
+    match &node.kind {
+        NodeKind::Group(children) => children.iter().any(|child| may_touch(child, world * child.transform, target)),
+        NodeKind::Shape(shape) => shape_may_touch(shape, &world, target),
+        NodeKind::Instance(_) => true, // the symbol's art is not looked at here
+        NodeKind::Camera(_) => false,
+    }
+}
+
+/// False only if the shape is certainly outside the target. Bounds come from the anchors and their
+/// handles (a Bézier curve stays inside the hull of its control points), widened for the stroke
+/// and for anti-aliasing. Skinned shapes are bent by bones, so they are never skipped.
+fn shape_may_touch(shape: &Shape, world: &Affine2, target: &sk::Pixmap) -> bool {
+    if shape.skin.is_some() {
+        return true;
+    }
+    let (mut min, mut max) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+    for anchor in shape.path.subpaths.iter().flat_map(|s| &s.anchors) {
+        for p in [anchor.pos, anchor.pos + anchor.handle_in, anchor.pos + anchor.handle_out] {
+            let p = world.transform_point2(p);
+            min = min.min(p);
+            max = max.max(p);
+        }
+    }
+    let margin = match shape.stroke.as_ref().filter(|s| s.width > 0.0) {
+        Some(stroke) => {
+            // Longest a transformed unit vector can get, so the stroke width is never underestimated.
+            let scale = (world.matrix2.x_axis.length_squared() + world.matrix2.y_axis.length_squared()).sqrt();
+            let reach = if stroke.join == LineJoin::Miter { stroke.miter_limit.max(std::f32::consts::SQRT_2) } else { std::f32::consts::SQRT_2 };
+            stroke.width * 0.5 * scale * reach + 1.0
+        }
+        None => 1.0,
+    };
+    if !(min.is_finite() && max.is_finite() && margin.is_finite()) {
+        return true; // empty or broken geometry: let the rasterizer decide
+    }
+    let bounds = Rect { min, max }.expanded(margin);
+    bounds.intersects(&Rect { min: Vec2::ZERO, max: Vec2::new(target.width() as f32, target.height() as f32) })
 }
 
 // --- Conversions to tiny-skia types ----------------------------------------------------------
@@ -177,7 +241,9 @@ fn to_skia_color(c: Color) -> sk::Color {
     sk::Color::from_rgba8(c.r, c.g, c.b, c.a)
 }
 
-fn to_skia_shader(paint: &Paint) -> Option<sk::Shader<'static>> {
+/// The tiny-skia shader of a paint: what the CPU renderer fills with. `None` when it would draw nothing (a gradient with
+/// no stops, or a transform that cannot be inverted); a gradient with a single stop, or a degenerate one, is a solid color.
+pub fn to_skia_shader(paint: &Paint) -> Option<sk::Shader<'static>> {
     match paint {
         Paint::Solid(color) => Some(sk::Shader::SolidColor(to_skia_color(*color))),
         Paint::Gradient(gradient) => {
@@ -258,8 +324,10 @@ mod tests {
         let id = scene.add(node, None);
         let (symbol, first) = scene.make_symbol(&[id], "Square").unwrap();
         let second = scene.place_instance(symbol, Vec2::new(60.0, 10.0)).unwrap();
-        if let Some(Node { kind: NodeKind::Instance(i), .. }) = scene.find_mut(second) {
-            i.fill = Some(Color::rgb(0, 0, 255));
+        if let Some(mut node) = scene.find_mut(second) {
+            if let NodeKind::Instance(i) = &mut node.kind {
+                i.fill = Some(Color::rgb(0, 0, 255));
+            }
         }
         assert_eq!(scene.symbol_usage(symbol), 2);
         let _ = first;
@@ -378,6 +446,68 @@ mod tests {
         let at = view.transform_point2(Vec2::new(180.0, 650.0));
         let p = pixmap.pixel(at.x as u32, at.y as u32).unwrap();
         assert_eq!((p.red(), p.green()), (0, 255), "tentacle body missing; bounds: {:?}", scene.world_bounds(id));
+    }
+
+
+    #[test]
+    fn culling_never_changes_the_picture() {
+        use crate::style::Stroke;
+        let mut scene = Scene::default();
+        // A grid of shapes around and far outside a 100 x 100 view: thick mitered strokes that reach in
+        // from outside, rotated and stretched ones, curves, and shapes at partial opacity.
+        let mut seed = 7_u32;
+        let mut random = move |low: f32, high: f32| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            low + (seed >> 8) as f32 / (1u32 << 24) as f32 * (high - low)
+        };
+        for i in 0..120 {
+            let center = Vec2::new(random(-300.0, 400.0), random(-300.0, 400.0));
+            let mut shape = Shape::new(if i % 3 == 0 { Path::ellipse(Vec2::ZERO, Vec2::new(random(2.0, 40.0), random(2.0, 40.0))) } else { Path::rect(Vec2::ZERO, Vec2::new(random(2.0, 60.0), random(2.0, 60.0))) });
+            shape.fill = (i % 4 != 0).then(|| Paint::Solid(Color::rgba(random(0.0, 255.0) as u8, 80, 160, 255)));
+            let mut stroke = Stroke::solid(Color::rgba(10, random(0.0, 255.0) as u8, 30, 200), random(0.5, 30.0));
+            stroke.join = [LineJoin::Miter, LineJoin::Round, LineJoin::Bevel][i % 3];
+            stroke.cap = [LineCap::Butt, LineCap::Round, LineCap::Square][i % 3];
+            stroke.miter_limit = random(1.0, 10.0);
+            shape.stroke = Some(stroke);
+            let mut node = scene.new_node(format!("s{i}"), NodeKind::Shape(shape));
+            node.transform = Affine2::from_scale_angle_translation(Vec2::new(random(0.3, 3.0), random(0.3, 3.0)), random(0.0, std::f32::consts::TAU), center);
+            node.opacity = if i % 5 == 0 { 0.5 } else { 1.0 };
+            scene.add(node, None);
+        }
+        // Shapes just outside each edge whose strokes reach into the view: a thick line, and a sharp
+        // triangle whose miter spike points inward.
+        for (i, offset) in [Vec2::new(-30.0, 50.0), Vec2::new(130.0, 50.0), Vec2::new(50.0, -30.0), Vec2::new(50.0, 130.0)].into_iter().enumerate() {
+            let mut line = Shape::new(Path::rect(Vec2::new(-1.0, -40.0), Vec2::new(1.0, 40.0)));
+            line.fill = None;
+            line.stroke = Some(Stroke { width: 50.0, ..Stroke::solid(Color::rgb(200, 0, 0), 50.0) });
+            let mut node = scene.new_node(format!("edge line {i}"), NodeKind::Shape(line));
+            node.transform = Affine2::from_translation(offset) * Affine2::from_angle(i as f32 * 0.7);
+            scene.add(node, None);
+
+            let tip = Path { subpaths: vec![crate::path::SubPath { anchors: [(0.0, 0.0), (-40.0, 3.0), (-40.0, -3.0)].map(|(x, y)| crate::path::Anchor::corner(Vec2::new(x, y))).to_vec(), closed: true }] };
+            let mut spike = Shape::new(tip);
+            spike.fill = None;
+            spike.stroke = Some(Stroke { miter_limit: 20.0, ..Stroke::solid(Color::rgb(0, 0, 200), 6.0) });
+            let mut node = scene.new_node(format!("edge spike {i}"), NodeKind::Shape(spike));
+            node.transform = Affine2::from_translation(offset * 0.9 + Vec2::splat(5.0)) * Affine2::from_angle(i as f32 * 1.57 + 0.3);
+            scene.add(node, None);
+        }
+        // A clip group whose mask is far away, and one that overlaps the view.
+        for (n, offset) in [(0, 500.0), (1, 40.0)] {
+            let content = scene.new_node("content", NodeKind::Shape(Shape::new(Path::rect(Vec2::new(-1000.0, -1000.0), Vec2::new(1000.0, 1000.0)))));
+            let mask = scene.new_node("mask", NodeKind::Shape(Shape::new(Path::ellipse(Vec2::new(offset, offset), Vec2::splat(30.0)))));
+            let mut group = scene.new_node(format!("clip{n}"), NodeKind::Group(vec![content, mask]));
+            group.clip = true;
+            scene.add(group, None);
+        }
+        for view in [Affine2::IDENTITY, Affine2::from_translation(Vec2::new(-60.0, -40.0)) * Affine2::from_scale(Vec2::splat(2.5))] {
+            let draw = |cull: bool| {
+                let mut pixmap = sk::Pixmap::new(100, 100).unwrap();
+                render_nodes(&scene, view, &mut pixmap, cull);
+                pixmap
+            };
+            assert!(draw(true).data() == draw(false).data(), "culling changed the picture");
+        }
     }
 
     #[test]
