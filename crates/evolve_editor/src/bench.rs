@@ -227,8 +227,8 @@ pub fn run(project_path: &str, report_path: &str, options: BenchOptions) -> io::
     let anchors = count_anchors(&scene.nodes);
 
     let clone_ms = median_ms(5, || { black_box(scene.clone()); });
-    let mut history = History::new(scene);
-    let history_ms = median_ms(5, || { black_box(history.update(scene, false)); });
+    let mut history = History::new(scene, &project.physics);
+    let history_ms = median_ms(5, || { black_box(history.update(scene, &project.physics, false)); });
     let last = last_id(&scene.nodes);
     let find_us = median_ms(20, || { black_box(scene.find(last)); }) * 1000.0;
 

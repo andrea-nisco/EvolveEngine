@@ -135,7 +135,7 @@ impl EditorApp {
     pub(crate) fn from_project(project: Project, open: usize) -> Self {
         let scene = project.scenes[open].clone();
         Self {
-            history: History::new(&scene),
+            history: History::new(&scene, &project.physics),
             renderers: RendererSettings::without_gpu(RendererChoice::Cpu),
             frame_stats: Default::default(),
             frame_limit: crate::frame_limit::FrameLimit::Display,
@@ -244,7 +244,7 @@ impl EditorApp {
 
     /// Forgets everything tied to the scene that was open: selection, undo history, tool state.
     pub fn reset_editing_state(&mut self) {
-        self.history.reset(&self.scene);
+        self.history.reset(&self.scene, &self.project.physics);
         self.selection.clear();
         self.canvas.drag = Drag::None;
         self.canvas.pen.clear();
@@ -367,13 +367,13 @@ impl EditorApp {
     // --- Edit commands -------------------------------------------------------------------------
 
     pub fn undo(&mut self) {
-        if self.history.undo(&mut self.scene) {
+        if self.history.undo(&mut self.scene, &mut self.project.physics) {
             self.dirty = true;
         }
     }
 
     pub fn redo(&mut self) {
-        if self.history.redo(&mut self.scene) {
+        if self.history.redo(&mut self.scene, &mut self.project.physics) {
             self.dirty = true;
         }
     }
@@ -618,7 +618,7 @@ impl EditorApp {
         if !busy {
             self.auto_key(); // keys are part of the same undo step as the edit that caused them
         }
-        if self.history.update(&self.scene, busy) {
+        if self.history.update(&self.scene, &self.project.physics, busy) {
             self.dirty = true;
         }
         self.autosave_tick(ctx, busy);

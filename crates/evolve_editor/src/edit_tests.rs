@@ -72,8 +72,8 @@ fn a_rename_is_one_undoable_step() {
     h.get_all_by_role(Role::TextInput).find(|n| n.value().is_some_and(|v| v == original)).unwrap().type_text("X");
     h.run_steps(3);
     let app = h.state_mut();
-    assert!(app.history.update(&app.scene, false), "the rename is an edit the history records");
-    assert!(app.history.undo(&mut app.scene));
+    assert!(app.history.update(&app.scene, &app.project.physics, false), "the rename is an edit the history records");
+    assert!(app.history.undo(&mut app.scene, &mut app.project.physics));
     assert_eq!(app.scene.find(id).unwrap().name, original);
 }
 
@@ -118,6 +118,29 @@ fn the_physics_checkbox_adds_and_removes_a_body_and_leaves_other_settings_alone(
     h.get_by_label("Collision body").click();
     h.run_steps(3);
     assert!(h.state().scene.find(id).unwrap().body.is_none(), "unchecking removes it again");
+}
+
+// --- The physics settings of the Game menu ----------------------------------------------------------
+
+#[test]
+fn the_physics_settings_switch_on_hold_in_a_running_game_and_are_one_undo_step() {
+    let mut app = sample_app();
+    app.start_game();
+    let mut h = harness(app, |ui, app| app.physics_settings_menu(ui));
+    assert!(!h.state().project.physics.slow_offscreen, "off in the sample");
+
+    h.get_by_label("Slow physics out of view").click();
+    h.run_steps(3);
+    let app = h.state_mut();
+    assert!(app.project.physics.slow_offscreen, "the checkbox switched the rule on");
+    app.update_game(&egui::Context::default());
+    assert_eq!(app.play.as_ref().unwrap().runtime.physics_settings(), app.project.physics, "the running game has it at once");
+
+    assert!(app.history.update(&app.scene, &app.project.physics, false), "the change is an edit the history records");
+    app.undo();
+    assert!(!app.project.physics.slow_offscreen, "undo switches it off again");
+    app.update_game(&egui::Context::default());
+    assert!(!app.play.as_ref().unwrap().runtime.physics_settings().slow_offscreen, "and so does the running game");
 }
 
 // --- The Assets panel: symbol name ---------------------------------------------------------------

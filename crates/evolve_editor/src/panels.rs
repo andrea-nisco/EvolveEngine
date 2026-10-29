@@ -185,8 +185,13 @@ impl EditorApp {
                     }
                     ui.separator();
                     ui.checkbox(&mut self.game_view.colliders, "Show collision shapes");
+                    ui.add_enabled(self.project.physics.slow_offscreen, egui::Checkbox::new(&mut self.game_view.physics_area, "Show physics area"))
+                        .on_hover_text("The camera frame and the margin, where bodies are stepped every frame")
+                        .on_disabled_hover_text("Switch on \"Slow physics out of view\" first");
                     ui.checkbox(&mut self.game_view.anchors, "Show path anchors");
                     ui.checkbox(&mut self.game_view.stats, "Show statistics");
+                    ui.separator();
+                    self.physics_settings_menu(ui);
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.view.show_grid, "Show grid");

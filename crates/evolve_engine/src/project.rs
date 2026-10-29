@@ -4,6 +4,7 @@
 //! current one. Scenes are found by name (`load_scene("Level 2")`), so names are unique.
 
 use crate::game_camera::DEFAULT_SIZE;
+use crate::physics::PhysicsSettings;
 use crate::scene::Scene;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -12,6 +13,8 @@ pub struct Project {
     pub scenes: Vec<Scene>,
     /// Index of the scene the game starts with.
     pub start: usize,
+    /// Physics options for every scene of the game.
+    pub physics: PhysicsSettings,
 }
 
 impl Project {
@@ -21,7 +24,7 @@ impl Project {
     }
 
     pub fn single(scene: Scene) -> Self {
-        Self { scenes: vec![scene], start: 0 }
+        Self { scenes: vec![scene], start: 0, physics: PhysicsSettings::default() }
     }
 
     pub fn index_of(&self, name: &str) -> Option<usize> {

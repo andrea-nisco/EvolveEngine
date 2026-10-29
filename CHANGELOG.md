@@ -50,6 +50,19 @@ the project is not released yet, so everything is under "Unreleased".
   the frame takes 0.16 s.
 
 ### Added
+- Project file format version 4: physics settings for the whole project (`PhysicsSettings`: whether bodies away from the camera
+  are stepped less often, the margin around the camera's frame, how many frames apart they are stepped). Left out of the file while
+  they are the defaults (off, half a frame, every 4 frames). Older files open with the defaults.
+- Physics: with `slow_offscreen` on, dynamic bodies in the camera's frame grown by the margin are stepped every frame, the others
+  once every `offscreen_interval` frames by all the time they waited, collisions included (turns spread by id, so the work is even
+  from frame to frame). A waiting body that a stepped one may reach is stepped too; a waiting body keeps its contacts. The schedule
+  (`physics_schedule.rs`) is apart from the solver. Longer steps are less precise: a bouncy ball out of view bounces fewer times.
+- Game menu: "Slow physics out of view", with the margin (a share of the camera's frame, 0 to 500 %) and the interval (1 to 60
+  frames). A change holds at once in a running game (`Runtime::set_physics_settings`). The undo history records the project's
+  physics settings along with the scene, so Ctrl+Z takes back a change to them in the order it was made.
+- Play mode: with "Show collision shapes", a body that waits for its turn out of view is drawn dashed (`DebugBody::waiting`). The
+  Game menu's "Show physics area" draws the camera frame and the margin, where bodies are stepped every frame
+  (`Runtime::debug_physics_area`); it is greyed out while the rule is off.
 - `NodeMut::set_stroke_width(width)` and the script command `set_stroke_width(me, width)` (0 to 10,000): the width of a stroke is a
   paint change (it was a geometry change), and the GPU renderer keeps the triangles of a stroke while its new width is at most 10% wider
   or at least a quarter of the width they were made for (`evolve_gpu::tessellate::stroke_width_holds`); beyond that the shape is made

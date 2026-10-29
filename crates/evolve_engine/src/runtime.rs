@@ -3,9 +3,9 @@
 //! The editor's Play mode and exported games both use this. The runtime owns its own scene copy,
 //! so playing never changes the project being edited.
 
-use crate::geometry::Vec2;
+use crate::geometry::{Rect, Vec2};
 use crate::path::Polyline;
-use crate::physics::{BodyKind, Contact, ContactKind, PhysicsWorld};
+use crate::physics::{BodyKind, Contact, ContactKind, PhysicsSettings, PhysicsWorld};
 use crate::project::Project;
 use crate::scene::{NodeId, NodeKind, Scene};
 use crate::script;
@@ -166,6 +166,8 @@ pub struct DebugBody {
     pub outlines: Vec<Polyline>,
     /// Dynamic bodies collide as this circle (center, radius).
     pub circle: Option<(Vec2, f32)>,
+    /// Out of view, it was not stepped in the last frame (see [`crate::physics::PhysicsSettings`]).
+    pub waiting: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -197,6 +199,7 @@ impl Runtime {
     pub fn start(project: &Project, index: usize) -> Self {
         let index = index.min(project.scenes.len().saturating_sub(1));
         let mut world = World::new(project.scenes[index].clone());
+        world.physics.settings = project.physics;
         world.scene_names = project.scenes.iter().map(|s| s.name.clone()).collect();
         world.current_scene = index;
         let world = Rc::new(RefCell::new(world));
@@ -207,8 +210,17 @@ impl Runtime {
         runtime
     }
 
+    pub fn physics_settings(&self) -> PhysicsSettings {
+        self.world.borrow().physics.settings
+    }
+
+    /// Changes the project's physics settings while the game runs; they hold from the next frame on, in every scene.
+    pub fn set_physics_settings(&mut self, settings: PhysicsSettings) {
+        self.world.borrow_mut().physics.settings = settings;
+    }
+
     /// Replaces the running scene by scene number `index`, started from scratch. The console, the
-    /// clock, the globals and the random sequence carry over; everything else is new.
+    /// clock, the globals, the random sequence and the project's physics settings carry over; everything else is new.
     fn switch_to(&mut self, index: usize) {
         let Some(scene) = self.scenes.get(index) else { return };
         {
@@ -218,6 +230,7 @@ impl Runtime {
             world.time = old.time;
             world.globals = old.globals;
             world.rng = old.rng;
+            world.physics.settings = old.physics.settings;
             world.input = old.input;
             world.scene_names = old.scene_names;
             world.current_scene = index;
@@ -381,9 +394,15 @@ impl Runtime {
                     Some((bounds.center(), (bounds.size().x + bounds.size().y) * 0.25))
                 });
                 let outlines = if body.kind == BodyKind::Dynamic { Vec::new() } else { scene.world_outlines(id) };
-                DebugBody { id, kind: body.kind, outlines, circle: circle.flatten() }
+                DebugBody { id, kind: body.kind, outlines, circle: circle.flatten(), waiting: world.physics.is_waiting(id) }
             })
             .collect()
+    }
+
+    /// Where physics bodies count as in view, for drawing it; `None` when every body is stepped every frame.
+    pub fn debug_physics_area(&self) -> Option<Rect> {
+        let world = self.world.borrow();
+        world.physics.active_area(&world.scene)
     }
 }
 
@@ -613,5 +632,48 @@ mod tests {
         run(&mut runtime, 1, Input::default());
         assert_eq!(runtime.scene_name(), "Scene 3");
         assert!(runtime.log().iter().any(|l| l.error && l.text.contains("last scene")));
+    }
+
+    #[test]
+    fn the_debug_view_shows_the_physics_area_and_which_bodies_wait() {
+        // The default camera frames (0, 0) to (1280, 720); with a margin of 0.5 the area reaches 640 and 360 further out.
+        let mut scene = Scene::default();
+        let dynamic = Some(Body::new(BodyKind::Dynamic));
+        let near = add(&mut scene, "near", Path::ellipse(Vec2::new(640.0, 360.0), Vec2::splat(10.0)), dynamic, None);
+        let far = add(&mut scene, "far", Path::ellipse(Vec2::new(9000.0, 360.0), Vec2::splat(10.0)), dynamic, None);
+        let mut project = Project::single(scene);
+        assert_eq!(Runtime::start(&project, 0).debug_physics_area(), None, "the rule is off");
+
+        project.physics.slow_offscreen = true;
+        let mut runtime = Runtime::start(&project, 0);
+        assert_eq!(runtime.debug_physics_area(), Some(Rect { min: Vec2::new(-640.0, -360.0), max: Vec2::new(1920.0, 1080.0) }));
+        let mut far_waited = 0;
+        for _ in 0..4 {
+            run(&mut runtime, 1, Input::default());
+            let bodies = runtime.debug_bodies();
+            let waiting = |id: NodeId| bodies.iter().find(|b| b.id == id).unwrap().waiting;
+            assert!(!waiting(near), "in view, it never waits");
+            far_waited += waiting(far) as usize;
+        }
+        assert_eq!(far_waited, 3, "out of view, it waits 3 frames out of 4");
+    }
+
+    #[test]
+    fn the_projects_physics_settings_hold_in_every_scene() {
+        let mut project = three_scenes("fn on_update(me, dt) { next_scene(); }");
+        project.physics = PhysicsSettings { slow_offscreen: true, margin: 0.25, offscreen_interval: 8 };
+        let mut runtime = Runtime::start(&project, 0);
+        assert_eq!(runtime.physics_settings(), project.physics);
+        run(&mut runtime, 1, Input::default());
+        assert_eq!(runtime.scene_name(), "Scene 2");
+        assert_eq!(runtime.physics_settings(), project.physics, "still after a scene change");
+
+        // A change while the game runs holds in the next scenes too.
+        let mut runtime = Runtime::start(&project, 0);
+        let changed = PhysicsSettings { offscreen_interval: 2, ..project.physics };
+        runtime.set_physics_settings(changed);
+        run(&mut runtime, 1, Input::default());
+        assert_eq!(runtime.scene_name(), "Scene 2");
+        assert_eq!(runtime.physics_settings(), changed);
     }
 }

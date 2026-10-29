@@ -9,6 +9,7 @@ a rename alias, an upgrade step in `io.rs`) so that the old file still opens. Se
 
 | File | What it is |
 |---|---|
+| `v4.evolve` | The output of the version 4 writer, byte for byte: the built-in sample project (`evolve_editor --sample`). Its physics settings are the defaults, so the `physics` block that version 4 added is left out. |
 | `v3.evolve` | The output of the version 3 writer, byte for byte: the built-in sample project (two scenes). |
 | `v2.evolve` | Reconstructed from `v3.evolve`: its "Sunset" scene alone, stored under `scene` as version 2 did. |
 | `v1.evolve` | Reconstructed from the same scene: no camera object, the screen size and color stored on the scene instead. |

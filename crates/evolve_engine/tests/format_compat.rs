@@ -3,6 +3,7 @@
 
 use evolve_engine::geometry::Vec2;
 use evolve_engine::io::{self, FORMAT_VERSION};
+use evolve_engine::physics::PhysicsSettings;
 use evolve_engine::project::Project;
 use evolve_engine::scene::{NodeKind, Scene};
 use std::path::PathBuf;
@@ -48,6 +49,7 @@ fn every_old_file_still_opens_with_its_content_intact() {
         let view = scene.camera_view();
         assert_eq!(view.size, Vec2::new(1280.0, 720.0), "v{version}: the camera frames the old screen");
         assert_eq!(view.center, Vec2::new(640.0, 360.0), "v{version}: and is centred on it");
+        assert_eq!(project.physics, PhysicsSettings::default(), "v{version}: a file without physics settings gets the defaults");
     }
 }
 

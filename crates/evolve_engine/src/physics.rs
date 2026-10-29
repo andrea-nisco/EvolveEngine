@@ -5,8 +5,9 @@
 //! against *static* bodies, which can have any outline, concave ones included. *Trigger* bodies
 //! only report when a dynamic body enters or leaves them.
 
-use crate::geometry::{closest_point_on_segment, ray_segment_distance, Affine2, Vec2};
+use crate::geometry::{closest_point_on_segment, ray_segment_distance, Affine2, Rect, Vec2};
 use crate::path::Polyline;
+use crate::physics_schedule::{active_area, slows_bodies, Candidate, Schedule};
 use crate::scene::{Node, NodeId, NodeKind, Scene};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -40,6 +41,34 @@ pub struct Body {
 impl Body {
     pub fn new(kind: BodyKind) -> Self {
         Self { kind, restitution: 0.4, friction: 0.2, gravity_scale: 1.0 }
+    }
+}
+
+/// Physics options for the whole project, saved with it (format version 4).
+///
+/// With `slow_offscreen` on, dynamic bodies away from the camera are stepped less often: the ones in the camera's frame
+/// (grown by `margin`) every frame, the others once every `offscreen_interval` frames. Off, every body is stepped every
+/// frame. See [`crate::physics_schedule`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhysicsSettings {
+    pub slow_offscreen: bool,
+    /// How far around the camera's frame a body still counts as in view, as a fraction of the frame's size on each
+    /// side (0.5: half a frame more on every side).
+    pub margin: f32,
+    /// Bodies out of view are stepped once every this many frames.
+    pub offscreen_interval: u32,
+}
+
+impl Default for PhysicsSettings {
+    fn default() -> Self {
+        Self { slow_offscreen: false, margin: 0.5, offscreen_interval: 4 }
+    }
+}
+
+impl PhysicsSettings {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -230,13 +259,22 @@ pub struct Contact {
 pub struct PhysicsWorld {
     /// Units per second squared; +y is down.
     pub gravity: Vec2,
+    /// The project's settings: which bodies are stepped less often.
+    pub settings: PhysicsSettings,
     velocities: HashMap<NodeId, Vec2>,
     touching: HashSet<(NodeId, NodeId, bool)>,
+    schedule: Schedule,
 }
 
 impl Default for PhysicsWorld {
     fn default() -> Self {
-        Self { gravity: Vec2::new(0.0, 900.0), velocities: HashMap::new(), touching: HashSet::new() }
+        Self {
+            gravity: Vec2::new(0.0, 900.0),
+            settings: PhysicsSettings::default(),
+            velocities: HashMap::new(),
+            touching: HashSet::new(),
+            schedule: Schedule::default(),
+        }
     }
 }
 
@@ -262,7 +300,19 @@ impl PhysicsWorld {
         *self.velocities.entry(id).or_default() += impulse;
     }
 
-    /// Advances all dynamic bodies by `dt` seconds and returns the contacts that began or ended.
+    /// True if the body was not stepped in the last frame: it is out of view and waits for its turn.
+    pub fn is_waiting(&self, id: NodeId) -> bool {
+        self.schedule.is_waiting(id)
+    }
+
+    /// Where bodies count as in view (the camera's frame and the margin), or `None` when every body is stepped every frame.
+    pub fn active_area(&self, scene: &Scene) -> Option<Rect> {
+        slows_bodies(&self.settings).then(|| active_area(&self.settings, scene.camera_view().bounds()))
+    }
+
+    /// Advances the dynamic bodies by `dt` seconds and returns the contacts that began or ended. With
+    /// [`PhysicsSettings::slow_offscreen`] on, bodies out of view wait for their turn (see [`crate::physics_schedule`]);
+    /// a body that waits keeps its contacts as they were.
     pub fn step(&mut self, scene: &mut Scene, dt: f32) -> Vec<Contact> {
         let mut bodies: Vec<(NodeId, Body)> = Vec::new();
         scene.for_each_node(|node| {
@@ -276,17 +326,38 @@ impl PhysicsWorld {
             .map(|&(id, b)| (id, b.kind, scene.world_outlines(id)))
             .collect();
 
-        let mut dynamics: Vec<Dynamic> = bodies
+        // The dynamic bodies where they are now, as circles sized from their shapes.
+        let circles: Vec<(NodeId, Body, Vec2, f32)> = bodies
             .iter()
             .filter(|(_, b)| b.kind == BodyKind::Dynamic)
             .filter_map(|&(id, body)| {
                 let bounds = scene.world_bounds(id)?;
-                let radius = (bounds.size().x + bounds.size().y) * 0.25;
-                let velocity = self.velocity(id) + self.gravity * body.gravity_scale * dt;
-                Some(Dynamic { id, body, center: bounds.center() + velocity * dt, radius, velocity })
+                Some((id, body, bounds.center(), (bounds.size().x + bounds.size().y) * 0.25))
             })
             .collect();
-        let starts: Vec<Vec2> = dynamics.iter().map(|d| d.center - d.velocity * dt).collect();
+        let candidates: Vec<Candidate> = circles
+            .iter()
+            .map(|&(id, body, center, radius)| Candidate {
+                id,
+                bounds: Rect { min: center - Vec2::splat(radius), max: center + Vec2::splat(radius) },
+                speed: self.velocity(id).length(),
+                acceleration: (self.gravity * body.gravity_scale).length(),
+            })
+            .collect();
+        let times = self.schedule.plan(&self.settings, || scene.camera_view().bounds(), &candidates, dt);
+
+        let mut dynamics: Vec<Dynamic> = Vec::new();
+        let mut starts: Vec<Vec2> = Vec::new();
+        let mut waiting: HashSet<NodeId> = HashSet::new();
+        for (&(id, body, center, radius), time) in circles.iter().zip(times) {
+            let Some(dt) = time else {
+                waiting.insert(id);
+                continue;
+            };
+            let velocity = self.velocity(id) + self.gravity * body.gravity_scale * dt;
+            dynamics.push(Dynamic { id, body, center: center + velocity * dt, radius, velocity });
+            starts.push(center);
+        }
 
         let mut now: HashSet<(NodeId, NodeId, bool)> = HashSet::new();
         for d in &mut dynamics {
@@ -308,6 +379,11 @@ impl PhysicsWorld {
         for (d, start) in dynamics.iter().zip(&starts) {
             self.velocities.insert(d.id, d.velocity);
             scene.translate_world(d.id, d.center - *start);
+        }
+        if !waiting.is_empty() {
+            // A body that waited was not looked at: it still touches what it touched, as long as that is still there.
+            let obstacle_ids: HashSet<NodeId> = obstacles.iter().map(|(id, _, _)| *id).collect();
+            now.extend(self.touching.iter().copied().filter(|(a, b, _)| waiting.contains(a) && (waiting.contains(b) || obstacle_ids.contains(b))));
         }
 
         let mut contacts: Vec<Contact> = now
@@ -373,13 +449,24 @@ mod tests {
     }
 
     fn floor_and_ball(restitution: f32) -> (Scene, NodeId, NodeId) {
+        floor_and_ball_at(restitution, Vec2::ZERO)
+    }
+
+    /// The floor and the ball moved by `offset`. The scenes have no camera, so the view is (0, 0) to (1280, 720).
+    fn floor_and_ball_at(restitution: f32, offset: Vec2) -> (Scene, NodeId, NodeId) {
         let mut scene = Scene::default();
-        let floor = add_shape(&mut scene, Path::rect(Vec2::new(-100.0, 100.0), Vec2::new(300.0, 140.0)), Some(Body::new(BodyKind::Static)));
+        let floor = add_shape(&mut scene, Path::rect(Vec2::new(-100.0, 100.0) + offset, Vec2::new(300.0, 140.0) + offset), Some(Body::new(BodyKind::Static)));
         let mut body = Body::new(BodyKind::Dynamic);
         body.restitution = restitution;
-        let ball = add_shape(&mut scene, Path::ellipse(Vec2::new(50.0, 0.0), Vec2::splat(10.0)), Some(body));
+        let ball = add_shape(&mut scene, Path::ellipse(Vec2::new(50.0, 0.0) + offset, Vec2::splat(10.0)), Some(body));
         (scene, floor, ball)
     }
+
+    fn slow_offscreen() -> PhysicsWorld {
+        PhysicsWorld { settings: PhysicsSettings { slow_offscreen: true, ..PhysicsSettings::default() }, ..PhysicsWorld::default() }
+    }
+
+    const FAR: Vec2 = Vec2::new(5000.0, 0.0);
 
     fn simulate(scene: &mut Scene, world: &mut PhysicsWorld, seconds: f32) -> Vec<Contact> {
         let mut all = Vec::new();
@@ -418,6 +505,45 @@ mod tests {
         let contacts = simulate(&mut scene, &mut world, 2.0);
         let begins = contacts.iter().filter(|c| c.kind == ContactKind::Begin && c.a == ball && c.b == floor && !c.trigger).count();
         assert_eq!(begins, 1, "a resting ball keeps its contact: {contacts:?}");
+    }
+
+    #[test]
+    fn a_ball_out_of_view_still_falls_and_rests_on_the_floor_with_one_contact() {
+        let (mut scene, floor, ball) = floor_and_ball_at(0.0, FAR);
+        let mut world = slow_offscreen();
+        let contacts = simulate(&mut scene, &mut world, 3.0);
+        let center = scene.world_bounds(ball).unwrap().center() - FAR;
+        assert!((center.y - 90.0).abs() < 1.5, "rests on the floor top (y=100) with radius 10, got {center:?}");
+        let touches: Vec<_> = contacts.iter().filter(|c| c.a == ball && c.b == floor).map(|c| c.kind).collect();
+        assert_eq!(touches, vec![ContactKind::Begin], "the contact is kept between its turns");
+    }
+
+    #[test]
+    fn a_bouncy_ball_out_of_view_settles_without_bouncing_more_than_in_view() {
+        let touches = |offset: Vec2, mut world: PhysicsWorld| {
+            let (mut scene, floor, ball) = floor_and_ball_at(Body::new(BodyKind::Dynamic).restitution, offset);
+            let contacts = simulate(&mut scene, &mut world, 4.0);
+            let kinds: Vec<_> = contacts.iter().filter(|c| c.a == ball && c.b == floor).map(|c| c.kind).collect();
+            (kinds, world.velocity(ball).length())
+        };
+        let (in_view, _) = touches(Vec2::ZERO, PhysicsWorld::default());
+        let (out_of_view, speed) = touches(FAR, slow_offscreen());
+        // Its steps are 4 frames long, so it loses bounces (1 instead of 3 today); it must not gain any, nor hop once it lies.
+        assert_eq!(out_of_view.last(), Some(&ContactKind::Begin), "it ends on the floor: {out_of_view:?}");
+        assert!(out_of_view.len() <= in_view.len(), "{out_of_view:?} against {in_view:?} in view");
+        assert!(speed < 20.0, "it comes to rest: {speed}");
+    }
+
+    #[test]
+    fn with_the_rule_on_a_ball_in_view_moves_as_with_the_rule_off() {
+        let (mut on, _, ball) = floor_and_ball(0.6);
+        let (mut off, _, _) = floor_and_ball(0.6);
+        let (mut slow, mut every) = (slow_offscreen(), PhysicsWorld::default());
+        for _ in 0..120 {
+            slow.step(&mut on, 1.0 / 60.0);
+            every.step(&mut off, 1.0 / 60.0);
+        }
+        assert_eq!(on.world_bounds(ball), off.world_bounds(ball));
     }
 
     #[test]

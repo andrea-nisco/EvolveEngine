@@ -20,6 +20,7 @@ pub mod io;
 pub mod morph;
 pub mod path;
 pub mod physics;
+mod physics_schedule;
 pub mod project;
 pub mod render;
 pub mod revision;

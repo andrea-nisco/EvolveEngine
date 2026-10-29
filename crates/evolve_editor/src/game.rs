@@ -25,13 +25,18 @@ pub struct GameView {
     pub colliders: bool,
     pub anchors: bool,
     pub stats: bool,
+    /// The area where physics bodies count as in view (with "Slow physics out of view" on).
+    pub physics_area: bool,
 }
 
 impl Default for GameView {
     fn default() -> Self {
-        Self { colliders: true, anchors: false, stats: true }
+        Self { colliders: true, anchors: false, stats: true, physics_area: false }
     }
 }
+
+/// The line around the physics area: a color no body kind uses.
+const PHYSICS_AREA: Color32 = Color32::from_rgb(200, 120, 255);
 
 impl EditorApp {
     // --- Running -------------------------------------------------------------------------------
@@ -93,10 +98,34 @@ impl EditorApp {
         ctx.request_repaint();
         let dt = ctx.input(|i| i.stable_dt);
         play.fps = play.fps * 0.9 + (1.0 / dt.max(1e-4)) * 0.1;
+        // The physics settings can change while the game runs (the Game menu, an undo): they hold at once.
+        play.runtime.set_physics_settings(self.project.physics);
         if play.paused {
             return;
         }
         play.runtime.update(dt, collect_input_over(ctx, mouse, over_game));
+    }
+
+    /// The project's physics settings, in the Game menu. A change is one undo step, and holds at once in a running game.
+    pub fn physics_settings_menu(&mut self, ui: &mut egui::Ui) {
+        let settings = &mut self.project.physics;
+        ui.checkbox(&mut settings.slow_offscreen, "Slow physics out of view").on_hover_text(
+            "Bodies away from the camera are stepped less often, collisions included: less work in big scenes, less precise movement out of view",
+        );
+        ui.add_enabled_ui(settings.slow_offscreen, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("In view: the camera frame and");
+                let mut percent = (settings.margin * 100.0).round() as u32;
+                let margin = ui.add(egui::DragValue::new(&mut percent).range(0..=500).suffix(" %"));
+                if margin.on_hover_text("How far around the camera's frame a body still counts as in view, as a share of the frame's size on each side").changed() {
+                    settings.margin = percent as f32 / 100.0;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Out of view: every");
+                ui.add(egui::DragValue::new(&mut settings.offscreen_interval).range(1..=60).suffix(" frames"));
+            });
+        });
     }
 
     // --- Overlays ------------------------------------------------------------------------------
@@ -119,8 +148,20 @@ impl EditorApp {
                     painter.add(crate::overlay::outline_shape(&screen.pts(&outline.points), outline.closed, Stroke::new(1.5, color)));
                 }
                 if let Some((center, radius)) = body.circle {
-                    painter.circle_stroke(screen.pt(center), radius * camera.zoom, Stroke::new(1.5, color));
+                    let (center, radius) = (screen.pt(center), radius * camera.zoom);
+                    if body.waiting {
+                        // Out of view and waiting for its turn: dashed.
+                        let points: Vec<egui::Pos2> = (0..=48).map(|i| center + egui::Vec2::angled(i as f32 / 48.0 * std::f32::consts::TAU) * radius).collect();
+                        painter.extend(egui::Shape::dashed_line(&points, Stroke::new(1.5, color), 5.0, 4.0));
+                    } else {
+                        painter.circle_stroke(center, radius, Stroke::new(1.5, color));
+                    }
                 }
+            }
+        }
+        if self.game_view.physics_area {
+            if let Some(area) = play.runtime.debug_physics_area() {
+                painter.add(crate::overlay::outline_shape(&screen.pts(&area.corners()), true, Stroke::new(1.5, PHYSICS_AREA)));
             }
         }
         if self.game_view.anchors {

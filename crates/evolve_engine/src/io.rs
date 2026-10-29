@@ -2,6 +2,7 @@
 
 use crate::geometry::{Affine2, Vec2};
 use crate::path::{Anchor, Path, SubPath};
+use crate::physics::PhysicsSettings;
 use crate::project::Project;
 use crate::scene::{Node, NodeId, NodeKind, Scene, Shape};
 use crate::style::{Color, FillRule, Gradient, GradientKind, GradientStop, LineCap, LineJoin, Paint, Stroke};
@@ -11,9 +12,9 @@ use usvg::tiny_skia_path::PathSegment;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// Version 2 added the camera object, version 3 several scenes per project. Older files are
-/// upgraded when they are loaded: a version 1 or 2 file becomes a project with one scene.
-pub const FORMAT_VERSION: u32 = 3;
+/// Version 2 added the camera object, version 3 several scenes per project, version 4 the project's physics
+/// settings. Older files are upgraded when they are loaded: a version 1 or 2 file becomes a project with one scene.
+pub const FORMAT_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct ProjectFile {
@@ -25,6 +26,9 @@ struct ProjectFile {
     /// Index into `scenes` of the scene the game starts with.
     #[serde(default)]
     start: usize,
+    /// Physics options for the whole project (version 4). Left out while they are the defaults.
+    #[serde(default, skip_serializing_if = "PhysicsSettings::is_default")]
+    physics: PhysicsSettings,
     /// The single scene of a version 1 or 2 file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scene: Option<Scene>,
@@ -42,6 +46,7 @@ pub fn project_to_string(project: &Project) -> Result<String> {
         version: FORMAT_VERSION,
         scenes: project.scenes.clone(),
         start: project.start,
+        physics: project.physics,
         scene: None,
     };
     let compact = serde_json::to_string(&file)?;
@@ -80,7 +85,7 @@ pub fn parse_project(text: &str) -> Result<Project> {
         scene.upgrade_legacy_view();
     }
     let start = file.start.min(scenes.len() - 1);
-    let mut project = Project { scenes, start };
+    let mut project = Project { scenes, start, physics: file.physics };
     // Scripts find scenes by name, so repair duplicate names from hand-edited files.
     for i in 1..project.scenes.len() {
         let name = project.scenes[i].name.clone();
@@ -331,6 +336,22 @@ mod tests {
         project.scenes[1].name = "Scene 1".into(); // a hand-edited file could do this
         let loaded = parse_project(&project_to_string(&project).unwrap()).unwrap();
         assert_eq!((loaded.scenes[0].name.as_str(), loaded.scenes[1].name.as_str()), ("Scene 1", "Scene 1 2"));
+    }
+
+    #[test]
+    fn physics_settings_are_saved_and_left_out_while_they_are_the_defaults() {
+        let mut project = Project::new();
+        assert!(!project_to_string(&project).unwrap().contains("\"physics\""), "the defaults are not written");
+        project.physics = PhysicsSettings { slow_offscreen: true, margin: 0.25, offscreen_interval: 8 };
+        let text = project_to_string(&project).unwrap();
+        assert!(text.contains("\"physics\""));
+        assert_eq!(parse_project(&text).unwrap(), project);
+
+        // A hand-edited file that gives only some of the settings gets the defaults for the others.
+        let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        json["physics"] = serde_json::json!({ "slow_offscreen": true });
+        let loaded = parse_project(&json.to_string()).unwrap();
+        assert_eq!(loaded.physics, PhysicsSettings { slow_offscreen: true, ..PhysicsSettings::default() });
     }
 
     #[test]

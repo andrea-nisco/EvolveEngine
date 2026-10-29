@@ -14,7 +14,7 @@ pub const OPEN_AT_START: usize = 1;
 
 /// A title screen followed by the sunset game. The game starts at the title.
 pub fn project() -> Project {
-    Project { scenes: vec![title(), scene()], start: 0 }
+    Project { scenes: vec![title(), scene()], start: 0, physics: Default::default() }
 }
 
 /// The title screen: a turning star and a button. Space or a click on the button goes to the next scene.

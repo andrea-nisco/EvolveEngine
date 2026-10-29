@@ -242,8 +242,8 @@ seconds (in `%LOCALAPPDATA%\EvolveEngine` on Windows, `~/Library/Application Sup
 **Project file versions:** your projects will keep opening. The format has a version number, and every new editor opens
 files of all older versions and upgrades them when it loads them (an editor never silently loses an old project).
 The reverse is not true: a file saved by a newer editor is refused by an older one, with a message.
-Version 1: one scene, screen size and color on the scene · 2: a camera object replaces the screen · 3 (current):
-several scenes per project.
+Version 1: one scene, screen size and color on the scene · 2: a camera object replaces the screen · 3: several
+scenes per project · 4 (current): physics settings for the whole project.
 
 The Objects panel shows the scene tree (drag rows to re-order or re-parent, eye/lock toggles, double-click to
 rename) and the Inspector shows the properties of the selection: position and size, opacity, fill and stroke (solid,
