@@ -40,6 +40,13 @@ pub struct ViewSettings {
     pub grid_size: f32,
     /// The frame times in the status bar.
     pub show_frame_times: bool,
+    /// Draws the demo of the game UI (EVOLVE_UI_PLAN.md, phase 2) over the Game view.
+    pub ui_demo: bool,
+    /// The player's own scale of the UI, how the UI adapts to the Game view, and a notch and a bar of the system simulated on it
+    /// (EVOLVE_UI_PLAN.md 4.4): ways to try the rules of the layout on a desktop.
+    pub ui_scale: f32,
+    pub ui_mode: evolve_ui_core::MatchMode,
+    pub ui_safe_area: bool,
 }
 
 /// State owned by the viewports: cached render targets and the interaction in progress.
@@ -47,6 +54,9 @@ pub struct CanvasState {
     /// Where the Scene view and the Game view are rasterized.
     pub scene_target: RenderTarget,
     pub game_target: RenderTarget,
+    /// Where the game's UI is drawn over the Game view, and the demo that gives it something to draw for now.
+    pub ui_target: RenderTarget,
+    pub ui_demo: Option<evolve_ui_scene::demo::UiDemo>,
     /// Pointer position in world space while it is over the Game view (what the game sees as its mouse), and while a drag with the
     /// right button that began over it goes on outside it.
     pub game_cursor: Option<Vec2>,
@@ -149,10 +159,12 @@ impl EditorApp {
             tool: Tool::Select,
             file: None,
             dirty: false,
-            view: ViewSettings { show_grid: true, snap_to_grid: false, smart_guides: true, grid_size: 20.0, show_frame_times: true },
+            view: ViewSettings { show_grid: true, snap_to_grid: false, smart_guides: true, grid_size: 20.0, show_frame_times: true, ui_demo: false, ui_scale: 1.0, ui_mode: evolve_ui_core::MatchMode::Min, ui_safe_area: false },
             canvas: CanvasState {
                 scene_target: RenderTarget::default(),
                 game_target: RenderTarget::default(),
+                ui_target: RenderTarget::default(),
+                ui_demo: None,
                 game_cursor: None,
                 game_drag: false,
                 drag: Drag::None,

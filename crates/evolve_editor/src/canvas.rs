@@ -246,7 +246,7 @@ impl RenderTarget {
                 (None, Some(_)) => None,
             };
         }
-        self.paint_cpu(painter, rect, background, scene, view, filter);
+        self.paint_cpu(painter, rect, background, scene, view, filter, false);
         if let Some(notice) = &self.notice {
             let font = egui::FontId::proportional(11.0);
             let galley = painter.layout_no_wrap(notice.clone(), font, egui::Color32::from_gray(210));
@@ -256,8 +256,31 @@ impl RenderTarget {
         }
     }
 
-    /// The CPU renderer: rasterizes `scene` at physical-pixel resolution and paints the bitmap into `rect`.
-    fn paint_cpu(&mut self, painter: &egui::Painter, rect: Rect, background: egui::Color32, scene: &Scene, view: impl Fn(Vec2) -> Affine2, filter: TextureOptions) {
+    /// Draws `scene`, a layer that has nothing behind it of its own (the game's UI, ADR 0001), over what the painter has already
+    /// painted in `rect`: the same renderers as `paint`, with a transparent background and no camera frame.
+    pub fn paint_overlay(&mut self, painter: &egui::Painter, rect: Rect, scene: &Scene, view: impl Fn(Vec2) -> Affine2, renderers: &RendererSettings, name: &'static str) {
+        self.notice = None;
+        if let Some(context) = renderers.usable_context() {
+            if self.gpu.is_none() {
+                match GpuTarget::new(context, name) {
+                    Ok(target) => self.gpu = Some(target),
+                    Err(why) => self.notice = Some(why),
+                }
+            }
+            if let Some(target) = &mut self.gpu {
+                match target.paint(painter, rect, scene, &view) {
+                    GpuOutcome::Shown | GpuOutcome::Nothing => return,
+                    GpuOutcome::Fallback(why) => self.notice = Some(why),
+                }
+            }
+        }
+        self.paint_cpu(painter, rect, egui::Color32::TRANSPARENT, scene, view, TextureOptions::LINEAR, true);
+    }
+
+    /// The CPU renderer: rasterizes `scene` at physical-pixel resolution and paints the bitmap into `rect`. An `overlay` starts
+    /// from a transparent picture and leaves the camera's frame out.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_cpu(&mut self, painter: &egui::Painter, rect: Rect, background: egui::Color32, scene: &Scene, view: impl Fn(Vec2) -> Affine2, filter: TextureOptions, overlay: bool) {
         let ctx = painter.ctx();
         let ppp = ctx.pixels_per_point();
         let (w, h) = ((rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32);
@@ -268,8 +291,13 @@ impl RenderTarget {
         let Some(pixmap) = self.pixmap.as_mut() else { return };
 
         let [r, g, b, _] = background.to_array();
-        pixmap.fill(Color::from_rgba8(r, g, b, 255));
-        render::render(scene, view(Vec2::new(w as f32, h as f32)), pixmap);
+        if overlay {
+            pixmap.fill(Color::TRANSPARENT);
+            render::render_content(scene, view(Vec2::new(w as f32, h as f32)), pixmap);
+        } else {
+            pixmap.fill(Color::from_rgba8(r, g, b, 255));
+            render::render(scene, view(Vec2::new(w as f32, h as f32)), pixmap);
+        }
 
         let image = egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixmap.data());
         match &mut self.texture {

@@ -161,6 +161,50 @@ feels and whether it flickers.
 - [ ] Open the illustration scene (see BENCHMARKS.md for `--gen-scene illustration`) with *GPU* chosen: no notice, and it looks like
       the *CPU* picture (it is the scene with thousands of transparent strokes, nested faded groups and instances).
 
+## UI text, phase 1 of the UI plan (EVOLVE_UI_PLAN.md)
+
+Setup: `cargo run -p evolve_ui_scene --release --example text_sheet -- local/ui_sheets` (the folder is made; `local/` is ignored by git).
+It writes `languages_1x.png`, `languages_2x.png`, `small_1x.png`, `small_2x.png` and `*_zoom.png` (a crop enlarged 4 times without
+smoothing), each also as `*_nosnap` (without the snapping of letters to whole pixels). Open them in an image viewer at 100%.
+
+- [ ] **Accents:** the first line of `languages_1x.png` reads "Perché è già così? Città, più, può. Àèéìòù ÀÈÉÌÒÙ", every accent in place
+  (grave and acute are different).
+- [ ] **Arabic** on the third line joins its letters and reads from the right ("مرحبا بالعالم، هذا اختبار للنص العربي"); the comma
+  falls where an Arabic reader expects it.
+- [ ] **Japanese** on the fourth line: hiragana, katakana and kanji, none as an empty box.
+- [ ] **Mixed line:** "Mixed: Evolve 日本語 العربية Ciao" keeps each script's own order; no empty boxes.
+- [ ] **12, 14 and 16 px at 1x** (`small_1x.png`): readable and clean? 14 and 16 px should look sharp. **12 px is the one to judge:** it is
+  readable but a little soft (the plan's risk: letters drawn as outlines have no hinting). Say whether it is good enough, or whether
+  the fallback of the plan (swash-rasterized glyphs for small text on the CPU path) should be built.
+- [ ] **Same at 2x** (`small_2x.png`): all sizes crisp.
+- [ ] **Snapping:** `small_1x_zoom.png` against `small_1x_nosnap_zoom.png`: the snapped one has more even spacing; say if you notice no
+  difference (then the option can go).
+- [ ] **Light on dark** (the dark bands of `small_*.png`): readable at 12 px.
+
+## UI demo over the game, phase 2 of the UI plan (EVOLVE_UI_PLAN.md)
+
+Setup: `cargo run -p evolve_editor --release`, open the sample project or any scene with a camera, and switch on **View > UI demo > Show over the
+Game view**. Also try `cargo run -p evolve_ui_scene --release --example ui_demo -- local/ui_sheets` and open the four `ui_demo_*.png`.
+
+- [ ] **A card and a HUD panel** appear over the Game view: soft shadows (no hard edge, no banding you can see), a rounded white card with a
+  hairline border, a red heart and a yellow star (SVG icons in one color), a green bar, a blue gradient button, an outlined button, text
+  in Italian, Arabic and Japanese cut by a rounded footer.
+- [ ] **The UI is sharp at any size of the Game panel:** drag the dividers to make the Game view small and large; the text and icons stay
+  sharp, everything keeps its proportions (the UI scales with the smaller ratio to a 1920 x 1080 screen).
+- [ ] **Renderer:** switch *View > Renderer* between CPU, GPU and Automatic; the UI looks the same (the shadows may differ by a shade).
+- [ ] **Idle:** with the UI demo on and nothing moving, the status bar frame times stay as without it (the UI costs 0.16 ms a frame when
+  nothing changed, and the card draws nothing again).
+- [ ] **Layout, not coordinates:** make the Game panel very wide, very tall, tiny. The card stays at the top left and the HUD panel at the top
+  right, 96 logical pixels from the edges, they never overlap or leave the picture, and the card's buttons keep the width of the card.
+- [ ] **UI scale** (*View > UI demo > UI scale*): 0.5 makes everything half as large, 2 twice as large; the card and the HUD panel keep their corners.
+- [ ] **Adapt to the view by:** with a wide Game panel, *Width* makes the UI larger than *Smaller ratio* (and may push the bottom of the card out of
+  view), *Height* the other way round, *Larger ratio* fills the view and may cut an edge.
+- [ ] **Simulate a notch and a bar:** the card and the HUD panel move down by the notch, and nothing of the UI goes under the bar at the bottom.
+- [ ] **Play (F5):** the game runs under the UI, the UI stays where it is. It is only drawn, it does not take clicks yet (phase 5).
+- [ ] **Not in the scene:** the Objects panel shows no node of the UI, and *File > Save* then reopening gives the same project.
+- [ ] **Out of the editor:** the four `ui_demo_*.png` show the same card and panel over a running game on 1920x1080, 1280x720, 2560x1080
+  and a phone held upright (the card shrinks with the width there: that is the rule).
+
 ## The web canary (plan task 2.12), for the T2 laptop and any browser
 
 One-time setup is the same as for the web player (`rustup target add wasm32-unknown-unknown`,

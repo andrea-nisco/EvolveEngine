@@ -50,6 +50,33 @@ the project is not released yet, so everything is under "Unreleased".
   the frame takes 0.16 s.
 
 ### Added
+- UI and text, phase 1 of [EVOLVE_UI_PLAN.md](EVOLVE_UI_PLAN.md) (decisions in [docs/adr](docs/adr)): three new crates. `evolve_ui_core` is
+  the neutral *draw list* (rounded rectangle, path, text run, clip brackets) with no engine types; `evolve_ui_text` shapes text with
+  `cosmic-text` (fallback between fonts, right-to-left, wrapping, ellipsis) and turns glyphs into outlines (swash), made once per font
+  and glyph; `evolve_ui_scene` turns a draw list into a *temporary scene* of the engine (never saved, not in the hierarchy) that the CPU
+  and GPU renderers draw as any scene: a letter is an instance of a shared symbol. Default fonts are inside the program (Inter, Noto Sans
+  Arabic, Noto Sans JP; subsets under the SIL Open Font License, `tools/build-ui-fonts.py`, 3.1 MB); the machine's own fonts are never
+  used, so text looks the same everywhere. `cargo run -p evolve_ui_scene --release --example text_sheet -- <folder>` draws the test
+  sheets (Italian, Arabic, Japanese, 12/14/16 px at 1x and 2x) as PNG files.
+- UI, phase 2: the draw list gained a linear gradient fill, a soft **shadow** command (a few rounded rectangles, each larger and fainter
+  than the next, that follow the Gaussian edge within a few percent; no blur is needed, so both renderers draw it) and an **image**
+  command (an SVG fitted into a rectangle, optionally in one color, so one icon serves any color). `UiLayer` keeps the UI's scene from
+  frame to frame: an unchanged draw list leaves it and its change stamps alone, so the GPU renderer draws nothing again (the editor
+  test counts it). The player draws a UI over the game after the scene (`PlayerApp::with_ui`, `draw_frame`) and so does the editor's
+  Game view (*View > UI demo over the Game view*, with the CPU and the GPU renderer). The screen scale follows the reference screen
+  of 1920 x 1080 with the smaller ratio (`screen_scale`). `cargo run -p evolve_ui_scene --release --example ui_demo -- <folder>` draws
+  the demo over a running game on four screen shapes. The player now links `evolve_ui_scene` (the fonts only get into a program that
+  uses them).
+- UI, phase 3 (first half: layout and units; the list of UI documents of a scene comes with phase 4 and the format change). `evolve_ui_core`
+  got `UiTree` (nodes with the plan's style words: hug, fill, gap, padding, align, justify, grow, wrap, grid, absolute, z-index,
+  overflow, aspect ratio, shadows, gradients) laid out with Taffy: only what changed is laid out again (a tree that did not change is
+  neither laid out nor drawn again; changing one text measures that text only), `ScreenMetrics` (the reference screen 1920 x 1080,
+  match modes width / height / min / expand, the player's UI scale, a safe area in physical pixels) and `ScreenStack` with the levels hud,
+  menu, modal and debug. Boxes snap to whole physical pixels. The text types moved to `evolve_ui_core` (`Typesetter`, implemented by
+  `TextSystem`) so that a tree can measure and draw text. `evolve_ui_scene` has `UiRuntime` (stack + text + layer); the demo is built from a
+  tree and has no coordinates; `UiSource::frame` now takes the `ScreenMetrics`. The cost of an unchanged UI frame went from 0.16 ms to 0.01 ms. *View > UI demo* in the editor has a UI scale, the match modes and a
+  simulated notch and bar, to try the rules of the layout on a desktop.
+- `Scene::add_symbol(name, children)`: a symbol made from free nodes, for code that builds scenes itself (the UI backend).
 - `NodeMut::set_stroke_width(width)` and the script command `set_stroke_width(me, width)` (0 to 10,000): the width of a stroke is a
   paint change (it was a geometry change), and the GPU renderer keeps the triangles of a stroke while its new width is at most 10% wider
   or at least a quarter of the width they were made for (`evolve_gpu::tessellate::stroke_width_holds`); beyond that the shape is made

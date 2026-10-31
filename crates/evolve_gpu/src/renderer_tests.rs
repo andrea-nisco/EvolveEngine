@@ -1331,8 +1331,23 @@ fn a_zoom_across_a_bucket_is_finished_over_several_frames_with_no_holes_and_ends
             first.get_or_insert_with(|| stats.clone());
             if frames == 1 {
                 // The first frame already shows every shape that is in the view (with the triangles it has): no holes.
-                let shown = covered(&picture_bytes(gpu, &renderer));
-                assert!(shown * 100 >= covered(&wanted) * 99, "{shown} covered pixels of {}", covered(&wanted));
+                // A hole is a shape that is missing, so look for ink at the centre of every circle that is in the view: that does not
+                // depend on how a card rounds the edges of the coarser polygons made for zoom 1. (Measured with the share of covered
+                // pixels alone: 99.4% on a GeForce RTX 3060, 98.95% on the "Apple Paravirtual device" of the macOS runner, so the
+                // share only has to say that nothing big is missing: 97%, where one missing circle is about 1.6 points.)
+                let picture = picture_bytes(gpu, &renderer);
+                let (mut in_view, mut missing) = (0, 0);
+                for i in 0..1600 {
+                    let (x, y) = (((i % 40) as f32 * 10.0 + 5.0) * 4.0, ((i / 40) as f32 * 10.0 + 5.0) * 4.0);
+                    if x < SIZE.0 as f32 - 1.0 && y < SIZE.1 as f32 - 1.0 {
+                        in_view += 1;
+                        missing += usize::from(picture[((y as u32 * SIZE.0 + x as u32) * 4 + 3) as usize] == 0);
+                    }
+                }
+                assert!(in_view > 20, "the test looks at {in_view} circles");
+                assert_eq!(missing, 0, "{missing} of the {in_view} circles in the view are missing from the first frame");
+                let shown = covered(&picture);
+                assert!(shown * 100 >= covered(&wanted) * 97, "{shown} covered pixels of {}", covered(&wanted));
             }
             if stats.deferred == 0 {
                 break;

@@ -48,8 +48,10 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev mesa-vulkan-drivers libvulkan1 libegl1
       - run: cargo test -p evolve_gpu --features egui --no-run
-      - name: Run the GPU tests (one minute at most, GPU_SAFETY.md F1)
-        timeout-minutes: 1
+      # One minute (GPU_SAFETY.md F1), except on Windows: its runner has only the software driver (WARP), on which the whole suite takes
+      # about 130 seconds. This job never fails the build; a hang would still be ended after six minutes.
+      - name: Run the GPU tests (one minute at most, six on Windows, GPU_SAFETY.md F1)
+        timeout-minutes: ${{ matrix.os == 'windows-latest' && 6 || 1 }}
         run: cargo test -p evolve_gpu --features egui -- --nocapture
 
   # The one place where the GPU tests must really run. On a machine with no adapter they print "skipped" and pass, so
@@ -104,4 +106,4 @@ jobs:
       - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
       - run: tools/build-web-player.sh
       # The GPU renderer and the web canary (plan 2.12) must keep compiling for the browser.
-      - run: cargo check -p evolve_gpu -p web_canary --lib --target wasm32-unknown-unknown
+      - run: cargo check -p evolve_gpu -p web_canary -p evolve_ui_core -p evolve_ui_text -p evolve_ui_scene --lib --target wasm32-unknown-unknown

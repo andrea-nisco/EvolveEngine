@@ -13,8 +13,13 @@ crate-type = ["cdylib", "rlib"]
 name = "evolve_player"
 path = "src/main.rs"
 
+[features]
+# `--ui-demo` on the command line: draws the UI demo of EVOLVE_UI_PLAN.md over the game (it brings the default fonts, 3 MB, into the program).
+ui-demo = []
+
 [dependencies]
 evolve_engine = { path = "../evolve_engine" }
+evolve_ui_scene = { path = "../evolve_ui_scene" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # OpenGL keeps the player small and lets the same code run in the browser (WebGL).
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
@@ -30,3 +35,7 @@ web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElemen
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
+
+[dev-dependencies]
+evolve_ui_core = { path = "../evolve_ui_core" }
+evolve_ui_text = { path = "../evolve_ui_text" }

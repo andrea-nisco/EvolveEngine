@@ -1,0 +1,15 @@
+[package]
+name = "evolve_ui_scene"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Evolve UI backend: turns a draw list into a temporary scene of evolve_engine, drawn by the existing renderers."
+
+[dependencies]
+evolve_engine = { version = "0.1.0", path = "../evolve_engine" }
+evolve_ui_core = { version = "0.1.0", path = "../evolve_ui_core" }
+evolve_ui_text = { version = "0.1.0", path = "../evolve_ui_text" }
+
+[dev-dependencies]
+evolve_gpu = { version = "0.1.0", path = "../evolve_gpu" }
+wgpu = "30.0.1"

@@ -44,8 +44,18 @@ Numbers and how to reproduce them: [BENCHMARKS.md](BENCHMARKS.md).
        the walks over unchanged views, zoom-bucket hitches, true instancing, layer reuse), or Phase 6 (skinned shapes) first.
 5. [ ] Then the game: borders and constant-width strokes (done), coats of arms as SVG (first look done 2026-10-27: random
        shields over the capitals, fixed 100 km size; still to do: follow the zoom and fade as in the Unity game, shadow, editing a
-       shield, the player's own shield), text and UI (a plan of its own, to write), picking provinces (needs a spatial
+       shield, the player's own shield), text and UI (plan: [EVOLVE_UI_PLAN.md](EVOLVE_UI_PLAN.md); phases 0 and 1 done 2026-10-31), picking provinces (needs a spatial
        index; today a click takes about 7 ms), soldiers.
+
+**CI follow-ups (2026-11-01)**
+- [x] macOS runner ("Apple Paravirtual device", Metal): `a_zoom_across_a_bucket_is_finished_over_several_frames_...` failed at 98.95% covered
+      pixels against a 99% threshold (99.4% on the RTX 3060). The test now looks for ink at the centre of every circle in the view (a hole is a
+      missing shape) and keeps the coverage only as a coarse check at 97%. Not reproduced on that machine: if it fails again there, look at what
+      the first frame draws on Metal (the picture dump of `EVOLVE_DUMP_PICTURES` is for the picture tests, not this one).
+- [x] Windows runner: the non-blocking `gpu-probe` job timed out after one minute (the software driver needs about 130 s for the suite); six minutes there.
+- [ ] Decide whether the Windows suite should be shortened or split instead (GPU_SAFETY.md F1 says one minute per test binary), and write what
+      the three runners offer into plan task 0.7 / OPEN_POINTS P1: Linux llvmpipe (Vulkan and GL), Windows WARP (Dx12, no WebGL2-limits device),
+      macOS Apple Paravirtual (Metal, integrated).
 
 **Open questions for the owner**
 - The open questions in section 8 of [GPU_RENDERER_PLAN.md](GPU_RENDERER_PLAN.md) (performance bar and machine,

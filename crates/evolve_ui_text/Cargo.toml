@@ -1,0 +1,12 @@
+[package]
+name = "evolve_ui_text"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Evolve UI: fonts, text shaping and glyph outlines (cosmic-text + swash). No engine types, no GPU."
+
+[dependencies]
+evolve_ui_core = { version = "0.1.0", path = "../evolve_ui_core" }
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash"] }
+swash = { version = "0.2.10", default-features = false, features = ["scale"] }
+unicode-script = "0.5"

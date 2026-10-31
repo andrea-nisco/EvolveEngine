@@ -26,6 +26,19 @@ impl EditorApp {
         let (frame, scale) = fit(camera.size, area.shrink(4.0));
         let drawing = std::time::Instant::now();
         self.canvas.game_target.paint(&painter, frame, Color32::BLACK, shown, |pixels| camera.view_matrix(pixels), TextureOptions::LINEAR, &self.renderers, "Game view");
+        // The game's UI goes over the picture of the game, drawn last (ADR 0001).
+        if self.view.ui_demo {
+            let ppp = ui.ctx().pixels_per_point();
+            let (mode, user_scale) = (self.view.ui_mode, self.view.ui_scale);
+            let metrics = move |pixels: (f32, f32)| evolve_ui_core::ScreenMetrics::new(pixels).with_mode(mode).with_user_scale(user_scale);
+            let pixels = (frame.width() * ppp, frame.height() * ppp);
+            // A notch at the top and a bar at the bottom, as large as a phone's (about 6% and 4% of the height).
+            let safe_area = if self.view.ui_safe_area { evolve_ui_core::Insets::new(0.0, pixels.1 * 0.06, 0.0, pixels.1 * 0.04) } else { evolve_ui_core::Insets::ZERO };
+            let screen = metrics(pixels).with_safe_area(safe_area);
+            let demo = self.canvas.ui_demo.get_or_insert_with(evolve_ui_scene::demo::UiDemo::new);
+            let layer = evolve_ui_scene::UiSource::frame(demo, &screen);
+            self.canvas.ui_target.paint_overlay(&painter, frame, layer, |px| evolve_ui_scene::logical_view(metrics((px.x, px.y)).scale()), &self.renderers, "UI overlay");
+        }
 
         // Where the pointer is in the world, through the camera: this is the game's mouse. A drag with the right button that began over
         // the picture goes on being followed outside it (the game would otherwise see the mouse jump away).

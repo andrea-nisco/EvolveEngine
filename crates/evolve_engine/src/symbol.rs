@@ -159,6 +159,17 @@ impl Scene {
         Some((id, instance))
     }
 
+    /// Adds a symbol whose master artwork is `children` (nodes made with [`Scene::new_node`], not placed in the scene), for code
+    /// that builds scenes by itself, such as the UI. Nothing is placed: use [`Scene::place_instance`] or an `Instance` node.
+    pub fn add_symbol(&mut self, name: &str, children: Vec<Node>) -> SymbolId {
+        let root = self.new_node("Symbol", NodeKind::Group(children));
+        let id = SymbolId(self.next_id);
+        self.next_id += 1;
+        self.symbols.push(Symbol { id, name: name.to_string(), root });
+        self.touch(Changes::STRUCTURE);
+        id
+    }
+
     /// Redefines a symbol from the selected nodes (which become an instance of it).
     /// Fails if the selection would make the symbol contain itself.
     pub fn update_symbol(&mut self, symbol: SymbolId, ids: &[NodeId]) -> Option<NodeId> {
@@ -272,6 +283,22 @@ mod tests {
         let mut node = scene.new_node("sq", NodeKind::Shape(Shape::new(Path::rect(Vec2::ZERO, Vec2::splat(10.0)))));
         node.transform = Affine2::from_translation(at);
         scene.add(node, None)
+    }
+
+    #[test]
+    fn a_symbol_can_be_added_from_free_nodes_and_placed() {
+        let mut scene = Scene::default();
+        let shape = scene.new_node("s", NodeKind::Shape(Shape::new(Path::rect(Vec2::ZERO, Vec2::splat(10.0)))));
+        let before = scene.revision();
+        let symbol = scene.add_symbol("Box", vec![shape]);
+        assert!(scene.changed_since(&before).contains(Changes::STRUCTURE), "the change is stamped");
+        assert_eq!(scene.symbol(symbol).map(|s| s.name.as_str()), Some("Box"));
+        assert_eq!(scene.symbol_bounds(symbol).map(|b| b.size()), Some(Vec2::splat(10.0)));
+        assert_eq!(scene.symbol_usage(symbol), 0, "adding is not placing");
+        scene.place_instance(symbol, Vec2::new(5.0, 5.0)).expect("the symbol exists");
+        assert_eq!(scene.symbol_usage(symbol), 1);
+        let other = scene.add_symbol("Other", Vec::new());
+        assert_ne!(symbol, other, "ids are not reused");
     }
 
     #[test]
