@@ -10,12 +10,21 @@ fn main() -> eframe::Result {
     use evolve_player_core::{bundle, PlayerApp};
     use std::path::PathBuf;
 
+    // Arguments that are not options: the project to play.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let project_arg = args.iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
+    let ui_demo = args.iter().any(|a| a == "--ui-demo");
+    #[cfg(not(feature = "ui-demo"))]
+    if ui_demo {
+        eprintln!("--ui-demo needs a player built with the `ui-demo` feature: cargo run -p evolve_player --features ui-demo -- <project> --ui-demo");
+    }
+
     let loaded = std::env::current_exe()
         .ok()
         .and_then(|exe| bundle::read_project_for(&exe))
         .map(|json| io::parse_project(&json))
         .or_else(|| {
-            let path = std::env::args().nth(1).map(PathBuf::from).or_else(|| {
+            let path = project_arg.or_else(|| {
                 rfd::FileDialog::new().set_title("Open a Evolve project").add_filter("Evolve project", &["evolve"]).pick_file()
             })?;
             Some(io::load_project(&path))
@@ -35,7 +44,14 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     let app = match loaded {
-        Some(Ok(project)) => PlayerApp::new(&project),
+        Some(Ok(project)) => {
+            let app = PlayerApp::new(&project);
+            #[cfg(feature = "ui-demo")]
+            let app = if ui_demo { app.with_ui(Box::new(evolve_ui_scene::demo::UiDemo::new())) } else { app };
+            #[cfg(not(feature = "ui-demo"))]
+            let _ = ui_demo;
+            app
+        }
         Some(Err(error)) => PlayerApp::with_error(format!("Could not load the game: {error}")),
         None => PlayerApp::with_error("No game to play. Pass a .evolve file, or export one from the editor."),
     };

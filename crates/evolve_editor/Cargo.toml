@@ -9,6 +9,8 @@ eframe = "0.36.2"
 egui_dock = { version = "0.21.1", features = ["serde"] }
 evolve_engine = { version = "0.1.0", path = "../evolve_engine" }
 evolve_gpu = { version = "0.1.0", path = "../evolve_gpu", features = ["egui"] }
+evolve_ui_core = { version = "0.1.0", path = "../evolve_ui_core" }
+evolve_ui_scene = { version = "0.1.0", path = "../evolve_ui_scene" }
 evolve_player = { version = "0.1.0", path = "../evolve_player" }
 memory-stats = "1"
 rfd = "0.17.2"

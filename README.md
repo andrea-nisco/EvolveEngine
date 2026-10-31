@@ -280,6 +280,9 @@ crates/
     profile.rs      quality profiles (High, Balanced, Low) and the governor that picks one
     egui_glue.rs    shows the pictures inside egui (the editor and the desktop player)
     device.rs  errors.rs  a device without a window, graphics errors that never crash the editor
+  evolve_ui_core/  the UI, neutral part (EVOLVE_UI_PLAN.md): draw list, units and screens, style, the tree laid out with Taffy, the screen stack
+  evolve_ui_text/  UI text: fonts inside the program (OFL), shaping with cosmic-text, glyph outlines as paths
+  evolve_ui_scene/ UI backend: a draw list becomes a temporary scene of the engine, drawn by the CPU and GPU renderers; the demo
   evolve_player/   standalone player (desktop exe and WebAssembly) and the export/bundle code
     bundle.rs       appends a project to the player exe; writes the web folder
     app.rs          the player window; input.rs keyboard/pointer -> engine input
@@ -355,6 +358,7 @@ instead of 110 ms.
 | 6.1 Play / Pause / Stop in the viewport, debug overlays | Done (colliders, anchors, fps and draw statistics) |
 | 6.2 Export: standalone desktop and web (WebAssembly/HTML5) builds | Done. Desktop = player + project in one exe; web = folder with index.html, JS and WASM (about 6.5 MB, 1.7 MB gzipped) |
 | GPU renderer (extra, [plan](GPU_RENDERER_PLAN.md)) | In the editor as an option, the CPU renderer is still the default. Draws everything the CPU renderer draws except two rare cases (a skinned clip mask, a skinned shape inside a symbol instance), which fall back with a notice. Runs in a browser (the web canary), but the player and the web export still use the CPU renderer. Dashes, blend modes, masks, filters and text are later phases |
+| UI and text (extra, [plan](EVOLVE_UI_PLAN.md), decisions in [docs/adr](docs/adr)) | Phases 0 to 3 done (text with Latin, Arabic and Japanese; gradients, soft shadows, SVG icons, clips; flexbox and grid layout, screen scale and safe area, screen stack), drawn over a game by the CPU and GPU renderers. A demo is in *View > UI demo* of the editor and in the player with `--ui-demo` (`--features ui-demo`). Not yet: the `.evui` language, widgets, input, themes, the UI editor |
 | Change tracking, benchmarks, CI (extra) | The scene knows what changed (undo, renderer and picking use it); `--benchmark` and `--gen-scene`; CI builds and tests on Windows, macOS and Linux, with a GPU job on Linux that is prepared but has not run yet |
 | Editor structure | Dockable Objects / Scene / Game / Inspector panels, a camera object per scene, and several scenes per project with script-driven transitions (added after the roadmap, see [TODO.md](TODO.md) for the limits) |
 

@@ -340,3 +340,37 @@ fn the_cameras_frame_is_painted_under_the_gpu_picture_in_the_cameras_background_
     assert_eq!(polygons[0].0[0], egui::pos2(50.0 - 200.0, 40.0));
     assert_eq!(polygons[0].0[1], egui::pos2(50.0 + 200.0, 40.0));
 }
+
+#[test]
+fn the_ui_demo_is_drawn_over_the_game_view_once_and_idle_frames_reuse_its_picture() {
+    Gpu::for_each_test_mode(|gpu| {
+        let mut app = app_with(plain_scene(), RendererSettings::with_context(RendererChoice::Gpu, context(gpu)));
+        app.view.ui_demo = true;
+        let ctx = egui::Context::default();
+        frame(&mut app, &ctx);
+        let stamps = app.scene.revision();
+        let before = app.canvas.ui_target.gpu_counts().expect("the UI layer is drawn by the GPU renderer too");
+        for _ in 0..5 {
+            frame(&mut app, &ctx);
+        }
+        let after = app.canvas.ui_target.gpu_counts().expect("still the GPU");
+        assert!(app.canvas.ui_target.notice().is_none(), "no fallback to the CPU renderer for the UI");
+        assert!(before.0 >= 1, "the UI was drawn on the first frame");
+        assert_eq!(after.0, before.0, "five idle frames drew the UI no more times: the same draw list is the same scene");
+        assert_eq!(after.1 - before.1, 5, "all five reused the picture");
+        assert!(app.scene.changed_since(&stamps).is_empty(), "the UI is not in the user's scene: showing it changes nothing there");
+        assert!(app.scene.nodes.iter().all(|n| n.name != "glyph"), "and no node of the UI leaked into it");
+    });
+}
+
+#[test]
+fn the_ui_demo_is_drawn_by_the_cpu_renderer_too_and_is_off_by_default() {
+    let mut app = app_with(plain_scene(), RendererSettings::without_gpu(RendererChoice::Cpu));
+    let ctx = egui::Context::default();
+    frame(&mut app, &ctx);
+    assert!(!app.view.ui_demo && app.canvas.ui_demo.is_none(), "nothing UI is made until it is switched on");
+    app.view.ui_demo = true;
+    frame(&mut app, &ctx);
+    assert!(app.canvas.ui_demo.is_some(), "switched on: the demo exists and was drawn");
+    assert!(app.canvas.ui_target.gpu_counts().is_none(), "with the CPU choice no GPU target is made for it");
+}

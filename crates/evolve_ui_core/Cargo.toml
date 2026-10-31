@@ -1,0 +1,9 @@
+[package]
+name = "evolve_ui_core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Evolve UI: the neutral draw list every UI backend reads (no engine types, no GPU). See EVOLVE_UI_PLAN.md."
+
+[dependencies]
+taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }

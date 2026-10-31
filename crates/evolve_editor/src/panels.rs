@@ -193,6 +193,23 @@ impl EditorApp {
                     ui.checkbox(&mut self.view.snap_to_grid, "Snap to grid");
                     ui.checkbox(&mut self.view.smart_guides, "Smart guides");
                     ui.checkbox(&mut self.view.show_frame_times, "Show frame times");
+                    ui.menu_button("UI demo", |ui| {
+                        ui.checkbox(&mut self.view.ui_demo, "Show over the Game view");
+                        ui.add(egui::Slider::new(&mut self.view.ui_scale, 0.5..=2.0).text("UI scale"));
+                        ui.label("Adapt to the view by");
+                        for (mode, name) in [
+                            (evolve_ui_core::MatchMode::Min, "Smaller ratio (always fits)"),
+                            (evolve_ui_core::MatchMode::Width, "Width"),
+                            (evolve_ui_core::MatchMode::Height, "Height"),
+                            (evolve_ui_core::MatchMode::Expand, "Larger ratio (may cut an edge)"),
+                        ] {
+                            ui.radio_value(&mut self.view.ui_mode, mode, name);
+                        }
+                        ui.checkbox(&mut self.view.ui_safe_area, "Simulate a notch and a bar");
+                        if ui.button("Reset").clicked() {
+                            (self.view.ui_scale, self.view.ui_mode, self.view.ui_safe_area) = (1.0, evolve_ui_core::MatchMode::Min, false);
+                        }
+                    });
                     ui.horizontal(|ui| {
                         ui.label("Grid size");
                         ui.add(egui::DragValue::new(&mut self.view.grid_size).range(1.0..=500.0).speed(0.5));
